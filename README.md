@@ -27,6 +27,9 @@ powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 new-project -Name
 # 新建任务
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 new-task -Project my-project -Title "学习仓库并给出风险点" -Assignee DeepSeek -Reviewer "GitHub gpt-5-mini"
 
+# 新建带验收契约的任务（产物 + 测试命令 + 最大重试）
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 new-task -Project my-project -Title "修复登录" -Artifacts "src/auth/login.ts,tests/auth.spec.ts" -TestCommand "npm test -- tests/auth.spec.ts" -MaxAttempts 3
+
 # 查看状态
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 status
 
@@ -86,16 +89,23 @@ runtime/
 - `init`：初始化 `runtime` 状态目录。
 - `new-project`：创建项目。
 - `new-task`：创建任务。
+- `new-task`：支持任务契约（`-Artifacts`、`-TestCommand`、`-MaxAttempts`）。
 - `set-task`：更新任务状态和备注。
 - `status`：输出项目与任务总览。
 - `next`：挑选下一个可执行任务（`ready`）。
 - `reconcile`：把过期 `in_progress`（租约超时）任务回退到 `ready`。
 - `watchdog`：自动编排循环（调和 + 自动分派下一个 `ready` 任务）。
 - `review`：自动审查决策（`in_review` -> `done/ready`）。
+- `review`：自动审查决策 + 强制验收门（产物存在、测试命令通过）。
 - `dashboard`：类似工作台布局（上方主控，左下 OpenCode，右侧纵向队列 DeepSeek + Claude）。默认自动计算 Claude 数量（按 `ready/in_progress/in_review` 任务数，范围 `1-6`）；也可用 `-ClaudeCount` 手动覆盖（`0-6`）。
 - `check-ports`：检查当前端口规划是否与其它仓库冲突。
 - `quick-check`：一键快速健康检查（语法/端口/运行目录）。
 - `e2e-check`：一键端到端闭环验证（创建项目并跑完整状态流转）。
+
+## 无人化能力现状
+
+- 已实现：自动调度、自动回收、自动审查、验收门、失败重试上限熔断（超限 `blocked`）。
+- 仍建议：生产环境接入外部告警（飞书/钉钉/邮件）做最终值守提醒。
 
 ## 端口规划
 

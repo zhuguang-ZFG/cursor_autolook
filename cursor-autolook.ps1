@@ -12,10 +12,13 @@ param(
     [string]$Assignee = "DeepSeek",
     [string]$Reviewer = "GitHub gpt-5-mini",
     [string]$Note,
+    [string]$Artifacts,
+    [string]$TestCommand,
     [int]$Interval = 30,
     [int]$MaxRounds = 0,
     [int]$LeaseMinutes = 45,
-    [int]$ClaudeCount = -1
+    [int]$ClaudeCount = -1,
+    [int]$MaxAttempts = 3
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,6 +40,12 @@ function Ensure-Directory {
 
 function Get-Timestamp {
     return (Get-Date).ToString("yyyy-MM-ddTHH:mm:ssK")
+}
+
+function Parse-ListArg {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return @() }
+    return @($Value.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 }
 
 function New-Slug {
@@ -103,6 +112,16 @@ function Get-TaskFilePath {
     return (Join-Path (Join-Path $p.Dir "tasks") "$TaskId.json")
 }
 
+function Get-ProjectWorkspace {
+    param([string]$ProjectId)
+    $p = Require-Project -ProjectId $ProjectId
+    $proj = Read-JsonFile -Path $p.File
+    if ($proj.PSObject.Properties.Name -contains "workspace" -and -not [string]::IsNullOrWhiteSpace([string]$proj.workspace)) {
+        return [string]$proj.workspace
+    }
+    return $Root
+}
+
 function Resolve-ClaudeCount {
     param([string]$ProjectId)
     if ($ClaudeCount -ge 0) {
@@ -163,6 +182,7 @@ function Invoke-NewProject {
         id = $id
         name = $Name
         status = "active"
+        workspace = (Get-Location).Path
         createdAt = (Get-Timestamp)
         updatedAt = (Get-Timestamp)
     }
@@ -186,6 +206,10 @@ function Invoke-NewTask {
         status = "ready"
         assignee = $Assignee
         reviewer = $Reviewer
+        requiredArtifacts = @(Parse-ListArg -Value $Artifacts)
+        testCommand = $(if ([string]::IsNullOrWhiteSpace($TestCommand)) { $null } else { $TestCommand })
+        maxAttempts = $(if ($MaxAttempts -lt 1) { 1 } else { $MaxAttempts })
+        attemptCount = 0
         notes = @()
         createdAt = (Get-Timestamp)
         updatedAt = (Get-Timestamp)
@@ -333,6 +357,10 @@ function Invoke-Reconcile {
             $task = Read-JsonFile -Path $file
             $task.status = "ready"
             $task.leaseUntil = $null
+            if (-not ($task.PSObject.Properties.Name -contains "attemptCount")) {
+                $task | Add-Member -NotePropertyName attemptCount -NotePropertyValue 0 -Force
+            }
+            $task.attemptCount = [int]$task.attemptCount + 1
             if (-not ($task.PSObject.Properties.Name -contains "notes")) {
                 $task | Add-Member -NotePropertyName notes -NotePropertyValue @() -Force
             }
@@ -346,6 +374,49 @@ function Invoke-Reconcile {
         }
     }
     Write-Host "[OK] reconciled stale tasks: $count" -ForegroundColor Green
+}
+
+function Invoke-AcceptanceGate {
+    param(
+        [string]$ProjectId,
+        [object]$TaskData
+    )
+    $result = [ordered]@{
+        passed = $true
+        reasons = @()
+    }
+
+    $workspace = Get-ProjectWorkspace -ProjectId $ProjectId
+    $artifacts = @()
+    if ($TaskData.PSObject.Properties.Name -contains "requiredArtifacts") {
+        $artifacts = @($TaskData.requiredArtifacts)
+    }
+    foreach ($a in $artifacts) {
+        $full = Join-Path $workspace ([string]$a)
+        if (-not (Test-Path $full)) {
+            $result.passed = $false
+            $result.reasons += "missing artifact: $a"
+        }
+    }
+
+    $cmd = $null
+    if ($TaskData.PSObject.Properties.Name -contains "testCommand") {
+        $cmd = [string]$TaskData.testCommand
+    }
+    if (-not [string]::IsNullOrWhiteSpace($cmd)) {
+        try {
+            & powershell -NoProfile -Command $cmd
+            if ($LASTEXITCODE -ne 0) {
+                $result.passed = $false
+                $result.reasons += "test command failed: $cmd"
+            }
+        } catch {
+            $result.passed = $false
+            $result.reasons += "test command exception: $cmd"
+        }
+    }
+
+    return $result
 }
 
 function Invoke-Watchdog {
@@ -366,6 +437,23 @@ function Invoke-Watchdog {
 
         if ($running.Count -eq 0 -and $ready.Count -gt 0) {
             $nextTask = $ready[0]
+            $maxAttempts = if ($nextTask.PSObject.Properties.Name -contains "maxAttempts") { [int]$nextTask.maxAttempts } else { 3 }
+            $attemptCount = if ($nextTask.PSObject.Properties.Name -contains "attemptCount") { [int]$nextTask.attemptCount } else { 0 }
+            if ($attemptCount -ge $maxAttempts) {
+                $file = Get-TaskFilePath -ProjectId $Project -TaskId $nextTask.id
+                $task = Read-JsonFile -Path $file
+                $task.status = "blocked"
+                if (-not ($task.PSObject.Properties.Name -contains "notes")) {
+                    $task | Add-Member -NotePropertyName notes -NotePropertyValue @() -Force
+                }
+                $task.notes += ([ordered]@{
+                    at = (Get-Timestamp)
+                    text = "WATCHDOG: blocked after max attempts reached."
+                })
+                $task.updatedAt = (Get-Timestamp)
+                Write-JsonFile -Path $file -Data $task
+                Write-Host ("  [blocked] {0} max attempts reached ({1})" -f $nextTask.id, $maxAttempts) -ForegroundColor Yellow
+            } else {
             Write-Host ("  [dispatch] {0} - {1}" -f $nextTask.id, $nextTask.title) -ForegroundColor DarkGray
             $file = Get-TaskFilePath -ProjectId $Project -TaskId $nextTask.id
             $task = Read-JsonFile -Path $file
@@ -373,6 +461,10 @@ function Invoke-Watchdog {
             if (-not ($task.PSObject.Properties.Name -contains "leaseUntil")) {
                 $task | Add-Member -NotePropertyName leaseUntil -NotePropertyValue $null -Force
             }
+            if (-not ($task.PSObject.Properties.Name -contains "attemptCount")) {
+                $task | Add-Member -NotePropertyName attemptCount -NotePropertyValue 0 -Force
+            }
+            $task.attemptCount = [int]$task.attemptCount + 1
             $task.leaseUntil = (Get-Date).AddMinutes($LeaseMinutes).ToString("yyyy-MM-ddTHH:mm:ssK")
             if (-not ($task.PSObject.Properties.Name -contains "notes")) {
                 $task | Add-Member -NotePropertyName notes -NotePropertyValue @() -Force
@@ -383,6 +475,7 @@ function Invoke-Watchdog {
             })
             $task.updatedAt = (Get-Timestamp)
             Write-JsonFile -Path $file -Data $task
+            }
         }
 
         # Auto review gate: in_review -> done/ready
@@ -393,11 +486,13 @@ function Invoke-Watchdog {
                 $task | Add-Member -NotePropertyName notes -NotePropertyValue @() -Force
             }
             $text = @($task.notes | ForEach-Object { [string]$_.text }) -join " "
-            if ($text -match "(?i)(fail|bug|missing|regression|blocked)") {
+            $acceptance = Invoke-AcceptanceGate -ProjectId $Project -TaskData $task
+            $hasIssueKeywords = $text -match "(?i)(fail|bug|missing|regression|blocked)"
+            if ($hasIssueKeywords -or -not $acceptance.passed) {
                 $task.status = "ready"
                 $task.notes += ([ordered]@{
                     at = (Get-Timestamp)
-                    text = "AUTO-REVIEW: issues found, moved back to ready."
+                    text = "AUTO-REVIEW: issues found, moved back to ready. " + (@($acceptance.reasons) -join "; ")
                 })
             } else {
                 $task.status = "done"
@@ -436,9 +531,11 @@ function Invoke-Review {
         $task | Add-Member -NotePropertyName notes -NotePropertyValue @() -Force
     }
     $text = @($task.notes | ForEach-Object { [string]$_.text }) -join " "
-    if ($text -match "(?i)(fail|bug|missing|regression|blocked)") {
+    $acceptance = Invoke-AcceptanceGate -ProjectId $Project -TaskData $task
+    $hasIssueKeywords = $text -match "(?i)(fail|bug|missing|regression|blocked)"
+    if ($hasIssueKeywords -or -not $acceptance.passed) {
         $task.status = "ready"
-        $task.notes += ([ordered]@{ at = (Get-Timestamp); text = "AUTO-REVIEW: issues found, moved back to ready." })
+        $task.notes += ([ordered]@{ at = (Get-Timestamp); text = "AUTO-REVIEW: issues found, moved back to ready. " + (@($acceptance.reasons) -join "; ") })
     } else {
         $task.status = "done"
         $task.notes += ([ordered]@{ at = (Get-Timestamp); text = "AUTO-REVIEW: passed, moved to done." })
@@ -571,6 +668,8 @@ function Invoke-E2ECheck {
 
     $script:Project = $testProject
     $script:Title = $taskTitle
+    $script:TestCommand = "exit 0"
+    $script:Artifacts = ""
     Invoke-NewTask
 
     $tasks = @(Get-Tasks -ProjectId $testProject)
@@ -603,7 +702,7 @@ function Show-Help {
     Write-Host "Commands:"
     Write-Host "  init"
     Write-Host "  new-project -Name <name>"
-    Write-Host "  new-task -Project <project-id> -Title <title> [-Assignee ...] [-Reviewer ...]"
+    Write-Host "  new-task -Project <project-id> -Title <title> [-Assignee ...] [-Reviewer ...] [-Artifacts a,b] [-TestCommand ...] [-MaxAttempts N]"
     Write-Host "  set-task -Project <project-id> -TaskId <id> [-Status ready|in_progress|in_review|done|blocked] [-Note ...]"
     Write-Host "  status"
     Write-Host "  next -Project <project-id>"
