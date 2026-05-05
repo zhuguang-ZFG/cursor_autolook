@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("help", "init", "new-project", "new-task", "set-task", "status", "next", "check-ports", "reconcile", "watchdog", "review", "dashboard", "quick-check", "e2e-check", "metrics", "prep-brief", "cache-stats", "set-project-prefix")]
+    [ValidateSet("help", "init", "new-project", "new-task", "set-task", "status", "next", "check-ports", "reconcile", "watchdog", "review", "dashboard", "quick-check", "e2e-check", "metrics", "prep-brief", "cache-stats", "set-project-prefix", "enter-workflow")]
     [string]$Command = "help",
 
     [string]$Name,
@@ -287,6 +287,54 @@ function Invoke-SetProjectPrefix {
     $pFile = Get-ProjectPrefixFile -ProjectId $Project
     Set-Content -Path $pFile -Value $ProjectPrefix -Encoding UTF8
     Write-Host "[OK] project prefix updated: $pFile" -ForegroundColor Green
+}
+
+function Invoke-EnterWorkflow {
+    if ([string]::IsNullOrWhiteSpace($Project)) { throw "Please provide -Project" }
+    $p = Require-Project -ProjectId $Project
+    $proj = Read-JsonFile -Path $p.File
+    $workspace = if ($proj.PSObject.Properties.Name -contains "workspace") { [string]$proj.workspace } else { $Root }
+
+    Write-Host ""
+    Write-Host "=== Workflow Context Bootstrap ===" -ForegroundColor Cyan
+    Write-Host ("Project:   {0}" -f $Project)
+    Write-Host ("Workspace: {0}" -f $workspace)
+
+    Write-Host ""
+    Write-Host "--- Status ---" -ForegroundColor DarkCyan
+    $script:Project = $Project
+    Invoke-Status
+
+    Write-Host ""
+    Write-Host "--- Metrics ---" -ForegroundColor DarkCyan
+    $script:Project = $Project
+    Invoke-Metrics
+
+    $targetTaskId = $TaskId
+    if ([string]::IsNullOrWhiteSpace($targetTaskId)) {
+        $tasks = @(Get-Tasks -ProjectId $Project | Where-Object { $_.status -in @("in_progress", "ready", "in_review") } | Sort-Object createdAt)
+        if ($tasks.Count -gt 0) {
+            $targetTaskId = [string]$tasks[0].id
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($targetTaskId)) {
+        Write-Host ""
+        Write-Host "--- Brief ---" -ForegroundColor DarkCyan
+        $script:Project = $Project
+        $script:TaskId = $targetTaskId
+        Invoke-PrepBrief
+        $cacheFile = Get-TaskCacheFile -ProjectId $Project -TaskId $targetTaskId
+        if (Test-Path $cacheFile) {
+            $cache = Read-JsonFile -Path $cacheFile
+            if ($cache.PSObject.Properties.Name -contains "briefPath") {
+                Write-Host ("Brief file: {0}" -f [string]$cache.briefPath) -ForegroundColor Green
+            }
+        }
+    } else {
+        Write-Host ""
+        Write-Host "No runnable task found for brief bootstrap. Pass -TaskId to target a task." -ForegroundColor Yellow
+    }
 }
 
 function Invoke-PrepBrief {
@@ -1086,6 +1134,7 @@ function Show-Help {
     Write-Host "  prep-brief -Project <project-id> -TaskId <id>     # build cache-friendly prompt brief"
     Write-Host "  cache-stats                                        # prompt cache hit/miss stats"
     Write-Host "  set-project-prefix -Project <project-id> -ProjectPrefix <text>"
+    Write-Host "  enter-workflow -Project <project-id> [-TaskId <id>]   # bootstrap status/metrics/brief"
     Write-Host "  dashboard -Project <project-id> [-ClaudeCount N]   # top main + bottom-left opencode + right stack"
     Write-Host "  metrics [-Project <project-id>]"
     Write-Host "  check-ports"
@@ -1107,6 +1156,7 @@ switch ($Command) {
     "prep-brief"  { Invoke-PrepBrief }
     "cache-stats" { Invoke-CacheStats }
     "set-project-prefix" { Invoke-SetProjectPrefix }
+    "enter-workflow" { Invoke-EnterWorkflow }
     "dashboard"   { Invoke-Dashboard }
     "metrics"     { Invoke-Metrics }
     "check-ports" { Invoke-CheckPorts }

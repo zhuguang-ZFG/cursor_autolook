@@ -72,6 +72,9 @@ powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 cache-stats
 # 冻结项目级长前缀（高频复用上下文）
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 set-project-prefix -Project my-project -ProjectPrefix "Core stack: React+Node; coding style: minimal diffs; tests required for behavior changes."
 
+# 进入工作流上下文（一键输出 status/metrics/brief）
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 enter-workflow -Project my-project
+
 # 更新任务状态
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 set-task -Project my-project -TaskId <task-id> -Status in_review
 ```
@@ -116,6 +119,7 @@ runtime/
 - `prep-brief`：按缓存策略生成任务 brief（尽量提高 token 缓存命中）。
 - `cache-stats`：查看缓存命中/未命中统计与命中率。
 - `set-project-prefix`：设置项目级长前缀（跨任务稳定复用上下文）。
+- `enter-workflow`：一键注入工作流上下文（项目状态、指标、任务 brief）。
 - `dashboard`：全交互工作台布局（Cursor 主控 + Ops 管理窗格 + OpenCode + DeepSeek + Claude 队列）。默认自动计算 Claude 数量（按 `ready/in_progress/in_review` 任务数，范围 `1-6`）；也可用 `-ClaudeCount` 手动覆盖（`0-6`）。
 - `metrics`：查看累计吞吐指标（创建/分派/审查/完成/返工/阻断）。
 - `check-ports`：检查当前端口规划是否与其它仓库冲突。
