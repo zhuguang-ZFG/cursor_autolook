@@ -2,7 +2,10 @@ function Show-Help {
     Write-Host ""
     Write-Host "Cursor Autolook — Cursor as execution hub" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "简易模式:  .\cursor-autolook.ps1 menu   （默认无参数即打开菜单）"
+    Write-Host "简易模式:  .\cursor-autolook.ps1 menu         （默认无参数即菜单；交互式 Read-Host）"
+    Write-Host "一键进流程: .\cursor-autolook.ps1 go [-Project ID]          # 解析项目 + enter-workflow（脚本/Agent 友好）"
+    Write-Host "            .\cursor-autolook.ps1 go-watch [-Project ID] [-Interval 30]  # go + 新窗口 watchdog"
+    Write-Host "            .\cursor-autolook.ps1 go-hub [-Project ID]                   # go + 新窗口 automation-hub -Interval 10"
     Write-Host ""
     Write-Host "Commands:"
     Write-Host "  init"
