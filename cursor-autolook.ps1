@@ -14,7 +14,8 @@ param(
     [string]$Note,
     [int]$Interval = 30,
     [int]$MaxRounds = 0,
-    [int]$LeaseMinutes = 45
+    [int]$LeaseMinutes = 45,
+    [int]$ClaudeCount = -1
 )
 
 $ErrorActionPreference = "Stop"
@@ -100,6 +101,20 @@ function Get-TaskFilePath {
     )
     $p = Require-Project -ProjectId $ProjectId
     return (Join-Path (Join-Path $p.Dir "tasks") "$TaskId.json")
+}
+
+function Resolve-ClaudeCount {
+    param([string]$ProjectId)
+    if ($ClaudeCount -ge 0) {
+        if ($ClaudeCount -gt 6) { return 6 }
+        return $ClaudeCount
+    }
+    $tasks = @(Get-Tasks -ProjectId $ProjectId)
+    if ($tasks.Count -eq 0) { return 2 }
+    $active = @($tasks | Where-Object { $_.status -in @("ready", "in_progress", "in_review") }).Count
+    if ($active -le 1) { return 1 }
+    if ($active -ge 6) { return 6 }
+    return $active
 }
 
 function Invoke-Init {
@@ -437,6 +452,10 @@ function Invoke-Review {
 function Invoke-Dashboard {
     if ([string]::IsNullOrWhiteSpace($Project)) { throw "Please provide -Project" }
     Invoke-Init
+    $resolvedClaudeCount = Resolve-ClaudeCount -ProjectId $Project
+    if ($resolvedClaudeCount -lt 0 -or $resolvedClaudeCount -gt 6) {
+        throw "ClaudeCount must be between 0 and 6."
+    }
 
     $wt = Get-Command wt -ErrorAction SilentlyContinue
     if (-not $wt) {
@@ -446,25 +465,38 @@ function Invoke-Dashboard {
     $rootEscaped = $Root.Replace("'", "''")
     $projectEscaped = $Project.Replace("'", "''")
 
-    $centerCmd = "cd '$rootEscaped'; Write-Host '=== Cursor (C 位) ===' -ForegroundColor Cyan; if (Get-Command cursor -ErrorAction SilentlyContinue) { cursor . } else { Write-Host 'cursor command not found, use this pane as Cursor hub.' -ForegroundColor Yellow; powershell -NoExit }"
-    $leftCmd = "cd '$rootEscaped'; Write-Host '=== DeepSeek-TUI ===' -ForegroundColor Cyan; if (Get-Command deepseek -ErrorAction SilentlyContinue) { deepseek } else { Write-Host 'deepseek command not found.' -ForegroundColor Yellow; powershell -NoExit }"
-    $rightCmd = "cd '$rootEscaped'; Write-Host '=== OpenCode ===' -ForegroundColor Cyan; if (Get-Command opencode -ErrorAction SilentlyContinue) { opencode } else { Write-Host 'opencode command not found.' -ForegroundColor Yellow; powershell -NoExit }"
-    $bottomLeftCmd = "cd '$rootEscaped'; Write-Host '=== Claude-1 ===' -ForegroundColor Cyan; if (Get-Command claude -ErrorAction SilentlyContinue) { claude } else { Write-Host 'claude command not found.' -ForegroundColor Yellow; powershell -NoExit }"
-    $bottomMidCmd = "cd '$rootEscaped'; Write-Host '=== Claude-2 ===' -ForegroundColor Cyan; if (Get-Command claude -ErrorAction SilentlyContinue) { claude } else { Write-Host 'claude command not found.' -ForegroundColor Yellow; powershell -NoExit }"
-    $bottomRightCmd = "cd '$rootEscaped'; Write-Host '=== Claude-3 (review) ===' -ForegroundColor Cyan; if (Get-Command claude -ErrorAction SilentlyContinue) { claude } else { Write-Host 'claude command not found.' -ForegroundColor Yellow; powershell -NoExit }"
+    $topCmd = "cd '$rootEscaped'; Write-Host '=== Cursor Agent (主控/C位) ===' -ForegroundColor Cyan; if (Get-Command cursor -ErrorAction SilentlyContinue) { cursor agent } else { Write-Host 'cursor command not found, fallback to shell.' -ForegroundColor Yellow; powershell -NoExit }"
+    $bottomLeftCmd = "cd '$rootEscaped'; Write-Host '=== OpenCode ===' -ForegroundColor Cyan; if (Get-Command opencode -ErrorAction SilentlyContinue) { opencode } else { Write-Host 'opencode command not found.' -ForegroundColor Yellow; powershell -NoExit }"
+    $deepseekCmd = "cd '$rootEscaped'; Write-Host '=== DeepSeek-TUI ===' -ForegroundColor Cyan; if (Get-Command deepseek -ErrorAction SilentlyContinue) { deepseek } else { Write-Host 'deepseek command not found.' -ForegroundColor Yellow; powershell -NoExit }"
+    $claudeCmds = @(
+        "cd '$rootEscaped'; Write-Host '=== Claude-1 ===' -ForegroundColor Cyan; if (Get-Command claude -ErrorAction SilentlyContinue) { claude } else { Write-Host 'claude command not found.' -ForegroundColor Yellow; powershell -NoExit }",
+        "cd '$rootEscaped'; Write-Host '=== Claude-2 ===' -ForegroundColor Cyan; if (Get-Command claude -ErrorAction SilentlyContinue) { claude } else { Write-Host 'claude command not found.' -ForegroundColor Yellow; powershell -NoExit }",
+        "cd '$rootEscaped'; Write-Host '=== Claude-3 ===' -ForegroundColor Cyan; if (Get-Command claude -ErrorAction SilentlyContinue) { claude } else { Write-Host 'claude command not found.' -ForegroundColor Yellow; powershell -NoExit }",
+        "cd '$rootEscaped'; Write-Host '=== Claude-4 ===' -ForegroundColor Cyan; if (Get-Command claude -ErrorAction SilentlyContinue) { claude } else { Write-Host 'claude command not found.' -ForegroundColor Yellow; powershell -NoExit }",
+        "cd '$rootEscaped'; Write-Host '=== Claude-5 ===' -ForegroundColor Cyan; if (Get-Command claude -ErrorAction SilentlyContinue) { claude } else { Write-Host 'claude command not found.' -ForegroundColor Yellow; powershell -NoExit }",
+        "cd '$rootEscaped'; Write-Host '=== Claude-6 ===' -ForegroundColor Cyan; if (Get-Command claude -ErrorAction SilentlyContinue) { claude } else { Write-Host 'claude command not found.' -ForegroundColor Yellow; powershell -NoExit }"
+    )
 
-    & wt `
-        new-tab --title "Cursor Hub" powershell -NoExit -Command $centerCmd `
-        ";" split-pane -H --size 0.30 --title "DeepSeek-TUI" powershell -NoExit -Command $leftCmd `
-        ";" split-pane -H --size 0.50 --title "OpenCode" powershell -NoExit -Command $rightCmd `
-        ";" focus-pane -t 0 `
-        ";" split-pane -V --size 0.60 --title "Claude-1" powershell -NoExit -Command $bottomLeftCmd `
-        ";" focus-pane -t 1 `
-        ";" split-pane -V --size 0.60 --title "Claude-2" powershell -NoExit -Command $bottomMidCmd `
-        ";" focus-pane -t 2 `
-        ";" split-pane -V --size 0.60 --title "Claude-3" powershell -NoExit -Command $bottomRightCmd | Out-Null
+    # Layout (similar to user screenshot):
+    # Top: main control pane (Cursor Agent)
+    # Bottom-left: OpenCode
+    # Bottom-right: vertical queue (DeepSeek + dynamic Claude panes)
+    $wtArgs = @(
+        "-w", "0", "new-tab", "--title", "Main-Control", "powershell", "-NoExit", "-Command", $topCmd,
+        ";", "split-pane", "-V", "--size", "0.38", "--title", "OpenCode", "powershell", "-NoExit", "-Command", $bottomLeftCmd,
+        ";", "focus-pane", "-t", "1",
+        ";", "split-pane", "-H", "--size", "0.66", "--title", "DeepSeek-TUI", "powershell", "-NoExit", "-Command", $deepseekCmd
+    )
 
-    Write-Host "[OK] dashboard launched: top=DeepSeek/Cursor/OpenCode, bottom=Claude-1/2/3" -ForegroundColor Green
+    # Right column starts at pane index 2; stack Claude panes vertically there.
+    for ($i = 0; $i -lt $resolvedClaudeCount; $i++) {
+        $wtArgs += @(";", "focus-pane", "-t", "2")
+        $wtArgs += @(";", "split-pane", "-V", "--size", "0.66", "--title", "Claude-$($i+1)", "powershell", "-NoExit", "-Command", $claudeCmds[$i])
+    }
+
+    & wt @wtArgs | Out-Null
+    Write-Host "[OK] dashboard launched: top=Main-Control, bottom-left=OpenCode, right-column=DeepSeek+Claude($resolvedClaudeCount)" -ForegroundColor Green
+    Write-Host "[INFO] If you are not running inside Windows Terminal, this opens a separate WT window." -ForegroundColor Yellow
 }
 
 function Invoke-CheckPorts {
@@ -578,7 +610,7 @@ function Show-Help {
     Write-Host "  reconcile -Project <project-id>"
     Write-Host "  watchdog -Project <project-id> [-Interval 30] [-MaxRounds 0] [-LeaseMinutes 45]"
     Write-Host "  review -Project <project-id> -TaskId <id>"
-    Write-Host "  dashboard -Project <project-id>   # 6-pane: DeepSeek | Cursor | OpenCode + 3 Claude"
+    Write-Host "  dashboard -Project <project-id> [-ClaudeCount N]   # top main + bottom-left opencode + right stack"
     Write-Host "  check-ports"
     Write-Host "  quick-check"
     Write-Host "  e2e-check"

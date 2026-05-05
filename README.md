@@ -39,8 +39,11 @@ powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 reconcile -Projec
 # 启动自动编排循环（watchdog）
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 watchdog -Project my-project -Interval 20
 
-# 启动命令行分屏中枢（6 屏：DeepSeek/Cursor/OpenCode + 3 个 Claude）
+# 启动命令行分屏中枢（Claude 窗格自动按任务量计算）
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 dashboard -Project my-project
+
+# 也可手动覆盖自动值
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 dashboard -Project my-project -ClaudeCount 4
 
 # 执行自动审查决策（in_review -> done/ready）
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 review -Project my-project -TaskId <task-id>
@@ -89,7 +92,7 @@ runtime/
 - `reconcile`：把过期 `in_progress`（租约超时）任务回退到 `ready`。
 - `watchdog`：自动编排循环（调和 + 自动分派下一个 `ready` 任务）。
 - `review`：自动审查决策（`in_review` -> `done/ready`）。
-- `dashboard`：命令行 6 分屏中枢（上排：DeepSeek / Cursor / OpenCode，下排：Claude-1/2/3）。
+- `dashboard`：类似工作台布局（上方主控，左下 OpenCode，右侧纵向队列 DeepSeek + Claude）。默认自动计算 Claude 数量（按 `ready/in_progress/in_review` 任务数，范围 `1-6`）；也可用 `-ClaudeCount` 手动覆盖（`0-6`）。
 - `check-ports`：检查当前端口规划是否与其它仓库冲突。
 - `quick-check`：一键快速健康检查（语法/端口/运行目录）。
 - `e2e-check`：一键端到端闭环验证（创建项目并跑完整状态流转）。
