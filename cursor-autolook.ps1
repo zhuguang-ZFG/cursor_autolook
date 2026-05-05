@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("help", "init", "new-project", "new-task", "set-task", "status", "next", "check-ports", "reconcile", "watchdog", "review", "dashboard", "quick-check", "e2e-check", "metrics", "prep-brief", "cache-stats", "set-project-prefix", "enter-workflow", "serve-deepseek", "serve-opencode", "current-workflow", "agent-done", "close-open", "consume-callbacks", "watch-callbacks", "dashboard-layout", "set-dashboard-layout", "evolve-dashboard-layout", "evolve-supervisor", "supervisor-evolution", "evolve-routing", "evolve-reliability")]
+    [ValidateSet("help", "init", "new-project", "new-task", "set-task", "status", "next", "check-ports", "reconcile", "watchdog", "review", "dashboard", "quick-check", "e2e-check", "metrics", "prep-brief", "cache-stats", "set-project-prefix", "enter-workflow", "serve-deepseek", "serve-opencode", "current-workflow", "agent-done", "close-open", "consume-callbacks", "watch-callbacks", "dashboard-layout", "set-dashboard-layout", "evolve-dashboard-layout", "evolve-supervisor", "supervisor-evolution", "evolve-routing", "evolve-reliability", "ops-report")]
     [string]$Command = "help",
 
     [string]$Name,
@@ -2114,6 +2114,91 @@ function Invoke-EvolveReliability {
     }
 }
 
+function Get-BlockedReason {
+    param([object]$TaskData)
+    if ($TaskData.PSObject.Properties.Name -contains "dispatchEvidence") {
+        $ev = @($TaskData.dispatchEvidence | Where-Object { $_.event -eq "blocked" } | Select-Object -Last 1)
+        if ($ev.Count -gt 0 -and $ev[0].PSObject.Properties.Name -contains "reason") {
+            return [string]$ev[0].reason
+        }
+    }
+    if ($TaskData.PSObject.Properties.Name -contains "notes") {
+        $txt = @($TaskData.notes | ForEach-Object { [string]$_.text }) -join " | "
+        if ($txt -match "max attempts reached") { return "maxAttemptsReached" }
+        if ($txt -match "missing artifact") { return "missingArtifact" }
+        if ($txt -match "test command failed") { return "testCommandFailed" }
+    }
+    return "unknown"
+}
+
+function Invoke-OpsReport {
+    Invoke-Init
+    $taskFiles = Get-TaskHistoryFiles
+    if ($taskFiles.Count -eq 0) {
+        Write-Host "No task history found." -ForegroundColor Yellow
+        return
+    }
+
+    $tasks = @($taskFiles | ForEach-Object { Read-JsonFile -Path $_.FullName })
+
+    # Build project buckets from filesystem for accurate project id
+    $projectDirs = @(Get-ChildItem -Path $ProjectsDir -Directory -ErrorAction SilentlyContinue)
+    Write-Host "Ops Report" -ForegroundColor Cyan
+    Write-Host ("GeneratedAt: {0}" -f (Get-Timestamp)) -ForegroundColor DarkGray
+
+    foreach ($pd in $projectDirs) {
+        $projId = $pd.Name
+        if (-not [string]::IsNullOrWhiteSpace($Project) -and $Project -ne $projId) { continue }
+        $pTaskFiles = @(Get-ChildItem -Path (Join-Path $pd.FullName "tasks") -Filter "*.json" -File -ErrorAction SilentlyContinue)
+        if ($pTaskFiles.Count -eq 0) { continue }
+        $pTasks = @($pTaskFiles | ForEach-Object { Read-JsonFile -Path $_.FullName })
+
+        $total = $pTasks.Count
+        $done = @($pTasks | Where-Object { $_.status -eq "done" }).Count
+        $blocked = @($pTasks | Where-Object { $_.status -eq "blocked" }).Count
+        $ready = @($pTasks | Where-Object { $_.status -eq "ready" }).Count
+        $inProgress = @($pTasks | Where-Object { $_.status -eq "in_progress" }).Count
+        $inReview = @($pTasks | Where-Object { $_.status -eq "in_review" }).Count
+        $successRate = if ($total -gt 0) { [math]::Round(100.0 * $done / $total, 2) } else { 0 }
+        $blockedRate = if ($total -gt 0) { [math]::Round(100.0 * $blocked / $total, 2) } else { 0 }
+
+        $attemptValues = @($pTasks | ForEach-Object {
+            if ($_.PSObject.Properties.Name -contains "attemptCount") { [int]$_.attemptCount } else { 0 }
+        })
+        $avgAttempts = if ($attemptValues.Count -gt 0) { [math]::Round(($attemptValues | Measure-Object -Average).Average, 2) } else { 0 }
+
+        $switchTransitions = 0
+        foreach ($t in $pTasks) {
+            if (-not ($t.PSObject.Properties.Name -contains "dispatchEvidence")) { continue }
+            $dispatches = @($t.dispatchEvidence | Where-Object { $_.event -eq "dispatch" })
+            if ($dispatches.Count -lt 2) { continue }
+            $assignees = @($dispatches | ForEach-Object { [string]$_.assignee })
+            for ($i = 1; $i -lt $assignees.Count; $i++) {
+                if ($assignees[$i] -ne $assignees[$i - 1]) { $switchTransitions++ }
+            }
+        }
+
+        $blockedReasons = @{}
+        foreach ($t in @($pTasks | Where-Object { $_.status -eq "blocked" })) {
+            $r = Get-BlockedReason -TaskData $t
+            if (-not $blockedReasons.ContainsKey($r)) { $blockedReasons[$r] = 0 }
+            $blockedReasons[$r] = [int]$blockedReasons[$r] + 1
+        }
+        $reasonText = if ($blockedReasons.Keys.Count -eq 0) {
+            "(none)"
+        } else {
+            @($blockedReasons.Keys | Sort-Object | ForEach-Object { "{0}:{1}" -f $_, $blockedReasons[$_] }) -join ", "
+        }
+
+        Write-Host ""
+        Write-Host ("[{0}]" -f $projId) -ForegroundColor DarkCyan
+        Write-Host ("  total={0} done={1} blocked={2} ready={3} in_progress={4} in_review={5}" -f $total, $done, $blocked, $ready, $inProgress, $inReview)
+        Write-Host ("  successRate={0}% blockedRate={1}% avgAttempts={2}" -f $successRate, $blockedRate, $avgAttempts)
+        Write-Host ("  fallbackSwitchTransitions={0}" -f $switchTransitions)
+        Write-Host ("  blockedReasons={0}" -f $reasonText)
+    }
+}
+
 function Show-Help {
     Write-Host ""
     Write-Host "Cursor Autolook — Cursor as execution hub" -ForegroundColor Cyan
@@ -2145,6 +2230,7 @@ function Show-Help {
     Write-Host "  evolve-supervisor                                  # bounded cache-key evolution from runtime evidence"
     Write-Host "  evolve-routing                                     # bounded assignee/modelTier evolution from task outcomes"
     Write-Host "  evolve-reliability                                 # bounded reviewer evolution + agent reliability snapshot"
+    Write-Host "  ops-report [-Project <project-id>]                # production ops report (success/blocked/retry/fallback)"
     Write-Host "  supervisor-evolution                               # show evolution config and recent steps"
     Write-Host "  serve-deepseek                                      # start deepseek runtime api on isolated port"
     Write-Host "  serve-opencode [-AllowInsecure]                     # start opencode headless server on isolated port"
@@ -2178,6 +2264,7 @@ switch ($Command) {
     "evolve-supervisor" { Invoke-EvolveSupervisor }
     "evolve-routing" { Invoke-EvolveRouting }
     "evolve-reliability" { Invoke-EvolveReliability }
+    "ops-report" { Invoke-OpsReport }
     "supervisor-evolution" { Invoke-SupervisorEvolutionStatus }
     "serve-deepseek" { Invoke-ServeDeepSeek }
     "serve-opencode" { Invoke-ServeOpenCode }
