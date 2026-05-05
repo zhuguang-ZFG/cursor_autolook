@@ -37,10 +37,23 @@ function Invoke-GoWatch {
     $p = [string]$script:Project
     $psExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
     $iv = [string][int]$Interval
-    Start-Process -FilePath $psExe -WorkingDirectory $Root `
-        -ArgumentList @("-NoExit", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $cli,
+    $childArgs = @()
+    if (-not [bool]$ScheduleBackground) {
+        $childArgs += "-NoExit"
+    }
+    $childArgs += @("-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $cli,
         "watchdog", "-Project", $p, "-Interval", $iv)
-    Write-Host "[schedule / go-watch] Watchdog opened in a new PowerShell window (Ctrl+C there to stop)." -ForegroundColor Green
+    $sp = @{
+        FilePath         = $psExe
+        WorkingDirectory = $Root
+        ArgumentList     = $childArgs
+    }
+    if ([bool]$ScheduleBackground) {
+        $sp["WindowStyle"] = "Hidden"
+    }
+    Start-Process @sp
+    $where = if ([bool]$ScheduleBackground) { "hidden background host" } else { "a new PowerShell window (Ctrl+C there to stop)" }
+    Write-Host ("[schedule / go-watch] Watchdog started in {0}." -f $where) -ForegroundColor Green
 }
 
 function Invoke-GoHub {
@@ -51,8 +64,24 @@ function Invoke-GoHub {
     Invoke-GoWorkflow
     $p = [string]$script:Project
     $psExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-    Start-Process -FilePath $psExe -WorkingDirectory $Root `
-        -ArgumentList @("-NoExit", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $cli,
+    $hubArgs = @()
+    if (-not [bool]$ScheduleBackground) {
+        $hubArgs += "-NoExit"
+    }
+    $hubArgs += @("-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $cli,
         "automation-hub", "-Project", $p, "-Interval", "10")
-    Write-Host "[schedule-hub / go-hub] automation-hub opened in a new PowerShell window (Ctrl+C there to stop)." -ForegroundColor Green
+    $spHub = @{
+        FilePath         = $psExe
+        WorkingDirectory = $Root
+        ArgumentList     = $hubArgs
+    }
+    if ([bool]$ScheduleBackground) {
+        $spHub["WindowStyle"] = "Hidden"
+    }
+    Start-Process @spHub
+    $hubWhere = if ([bool]$ScheduleBackground) { "hidden background host" } else { "a new PowerShell window (Ctrl+C there to stop)" }
+    Write-Host ("[schedule-hub / go-hub] automation-hub started in {0}." -f $hubWhere) -ForegroundColor Green
+    if ([bool]$ScheduleBackground) {
+        Write-Host "  Tip: stop with Task Manager -> find powershell.exe child running cursor-autolook automation-hub, or: Get-Process powershell | Stop-Process (careful)." -ForegroundColor DarkGray
+    }
 }

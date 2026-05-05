@@ -65,7 +65,8 @@ param(
     [ValidateRange(1, 9999)]
     [int]$FeedTail = 100,
     [switch]$FeedOnce,
-    [switch]$FeedNewWindow
+    [switch]$FeedNewWindow,
+    [switch]$ScheduleBackground
 )
 
 $ErrorActionPreference = "Stop"
