@@ -57,6 +57,9 @@ powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 quick-check
 # 一键端到端闭环验证
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 e2e-check
 
+# 查看产能指标
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 metrics
+
 # 更新任务状态
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 set-task -Project my-project -TaskId <task-id> -Status in_review
 ```
@@ -98,6 +101,7 @@ runtime/
 - `review`：自动审查决策（`in_review` -> `done/ready`）。
 - `review`：自动审查决策 + 强制验收门（产物存在、测试命令通过）。
 - `dashboard`：类似工作台布局（上方主控，左下 OpenCode，右侧纵向队列 DeepSeek + Claude）。默认自动计算 Claude 数量（按 `ready/in_progress/in_review` 任务数，范围 `1-6`）；也可用 `-ClaudeCount` 手动覆盖（`0-6`）。
+- `metrics`：查看累计吞吐指标（创建/分派/审查/完成/返工/阻断）。
 - `check-ports`：检查当前端口规划是否与其它仓库冲突。
 - `quick-check`：一键快速健康检查（语法/端口/运行目录）。
 - `e2e-check`：一键端到端闭环验证（创建项目并跑完整状态流转）。
@@ -105,7 +109,7 @@ runtime/
 ## 无人化能力现状
 
 - 已实现：自动调度、自动回收、自动审查、验收门、失败重试上限熔断（超限 `blocked`）。
-- 仍建议：生产环境接入外部告警（飞书/钉钉/邮件）做最终值守提醒。
+- 已实现：告警钩子（写入 `runtime/alerts.log`，可选 `AUTOLOOK_ALERT_WEBHOOK` 推送）。
 
 ## 端口规划
 

@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("help", "init", "new-project", "new-task", "set-task", "status", "next", "check-ports", "reconcile", "watchdog", "review", "dashboard", "quick-check", "e2e-check")]
+    [ValidateSet("help", "init", "new-project", "new-task", "set-task", "status", "next", "check-ports", "reconcile", "watchdog", "review", "dashboard", "quick-check", "e2e-check", "metrics")]
     [string]$Command = "help",
 
     [string]$Name,
@@ -26,6 +26,8 @@ $Root = Split-Path -Parent $PSCommandPath
 $RuntimeDir = Join-Path $Root "runtime"
 $ProjectsDir = Join-Path $RuntimeDir "projects"
 $PortsFile = Join-Path $RuntimeDir "ports.json"
+$MetricsFile = Join-Path $RuntimeDir "metrics.json"
+$AlertsLogFile = Join-Path $RuntimeDir "alerts.log"
 $ReservedPortStart = 16121
 $ReservedPortEnd = 16160
 $KnownConflictStart = 15921
@@ -85,6 +87,77 @@ function Write-JsonFile {
 function Read-JsonFile {
     param([string]$Path)
     return (Get-Content -Path $Path -Raw | ConvertFrom-Json)
+}
+
+function Get-Metrics {
+    if (-not (Test-Path $MetricsFile)) {
+        return [ordered]@{
+            totals = @{
+                created = 0
+                dispatched = 0
+                reviewed = 0
+                done = 0
+                requeued = 0
+                blocked = 0
+            }
+            projects = @{}
+            updatedAt = (Get-Timestamp)
+        }
+    }
+    return Read-JsonFile -Path $MetricsFile
+}
+
+function Save-Metrics {
+    param([object]$Metrics)
+    $Metrics.updatedAt = (Get-Timestamp)
+    Write-JsonFile -Path $MetricsFile -Data $Metrics
+}
+
+function Add-MetricEvent {
+    param(
+        [string]$ProjectId,
+        [string]$EventType
+    )
+    $m = Get-Metrics
+    if (-not ($m.PSObject.Properties.Name -contains "projects")) {
+        $m | Add-Member -NotePropertyName projects -NotePropertyValue ([pscustomobject]@{}) -Force
+    }
+    if (-not ($m.projects.PSObject.Properties.Name -contains $ProjectId)) {
+        $m.projects | Add-Member -NotePropertyName $ProjectId -NotePropertyValue ([pscustomobject]@{
+            created = 0; dispatched = 0; reviewed = 0; done = 0; requeued = 0; blocked = 0
+        }) -Force
+    }
+    if (-not ($m.totals.PSObject.Properties.Name -contains $EventType)) {
+        $m.totals | Add-Member -NotePropertyName $EventType -NotePropertyValue 0 -Force
+    }
+    $projectMetrics = $m.projects.$ProjectId
+    if (-not ($projectMetrics.PSObject.Properties.Name -contains $EventType)) {
+        $projectMetrics | Add-Member -NotePropertyName $EventType -NotePropertyValue 0 -Force
+    }
+    $m.totals.$EventType = [int]$m.totals.$EventType + 1
+    $projectMetrics.$EventType = [int]$projectMetrics.$EventType + 1
+    Save-Metrics -Metrics $m
+}
+
+function Send-Alert {
+    param(
+        [string]$Level,
+        [string]$ProjectId,
+        [string]$TaskId,
+        [string]$Message
+    )
+    Ensure-Directory $RuntimeDir
+    $line = "[{0}] [{1}] project={2} task={3} {4}" -f (Get-Timestamp), $Level, $ProjectId, $TaskId, $Message
+    Add-Content -Path $AlertsLogFile -Value $line -Encoding UTF8
+    $webhook = $env:AUTOLOOK_ALERT_WEBHOOK
+    if (-not [string]::IsNullOrWhiteSpace($webhook)) {
+        try {
+            $payload = @{ text = $line } | ConvertTo-Json
+            Invoke-RestMethod -Method Post -Uri $webhook -ContentType "application/json" -Body $payload | Out-Null
+        } catch {
+            Add-Content -Path $AlertsLogFile -Value ("[{0}] [WARN] webhook send failed: {1}" -f (Get-Timestamp), $_) -Encoding UTF8
+        }
+    }
 }
 
 function Get-TaskFiles {
@@ -161,6 +234,9 @@ function Invoke-Init {
         }
         Write-JsonFile -Path $PortsFile -Data $ports
     }
+    if (-not (Test-Path $MetricsFile)) {
+        Save-Metrics -Metrics (Get-Metrics)
+    }
     Write-Host "[OK] runtime initialized at $RuntimeDir" -ForegroundColor Green
 }
 
@@ -216,6 +292,7 @@ function Invoke-NewTask {
     }
 
     Write-JsonFile -Path (Join-Path $tasksDir "$taskId.json") -Data $task
+    Add-MetricEvent -ProjectId $Project -EventType "created"
     Write-Host "[OK] task created: $taskId ($Title)" -ForegroundColor Green
 }
 
@@ -370,6 +447,7 @@ function Invoke-Reconcile {
             })
             $task.updatedAt = (Get-Timestamp)
             Write-JsonFile -Path $file -Data $task
+            Add-MetricEvent -ProjectId $Project -EventType "requeued"
             $count++
         }
     }
@@ -452,6 +530,8 @@ function Invoke-Watchdog {
                 })
                 $task.updatedAt = (Get-Timestamp)
                 Write-JsonFile -Path $file -Data $task
+                Add-MetricEvent -ProjectId $Project -EventType "blocked"
+                Send-Alert -Level "ERROR" -ProjectId $Project -TaskId $nextTask.id -Message "Task blocked after max attempts reached."
                 Write-Host ("  [blocked] {0} max attempts reached ({1})" -f $nextTask.id, $maxAttempts) -ForegroundColor Yellow
             } else {
             Write-Host ("  [dispatch] {0} - {1}" -f $nextTask.id, $nextTask.title) -ForegroundColor DarkGray
@@ -475,6 +555,7 @@ function Invoke-Watchdog {
             })
             $task.updatedAt = (Get-Timestamp)
             Write-JsonFile -Path $file -Data $task
+            Add-MetricEvent -ProjectId $Project -EventType "dispatched"
             }
         }
 
@@ -494,13 +575,16 @@ function Invoke-Watchdog {
                     at = (Get-Timestamp)
                     text = "AUTO-REVIEW: issues found, moved back to ready. " + (@($acceptance.reasons) -join "; ")
                 })
+                Add-MetricEvent -ProjectId $Project -EventType "requeued"
             } else {
                 $task.status = "done"
                 $task.notes += ([ordered]@{
                     at = (Get-Timestamp)
                     text = "AUTO-REVIEW: passed, moved to done."
                 })
+                Add-MetricEvent -ProjectId $Project -EventType "done"
             }
+            Add-MetricEvent -ProjectId $Project -EventType "reviewed"
             $task.leaseUntil = $null
             $task.updatedAt = (Get-Timestamp)
             Write-JsonFile -Path $file -Data $task
@@ -536,14 +620,37 @@ function Invoke-Review {
     if ($hasIssueKeywords -or -not $acceptance.passed) {
         $task.status = "ready"
         $task.notes += ([ordered]@{ at = (Get-Timestamp); text = "AUTO-REVIEW: issues found, moved back to ready. " + (@($acceptance.reasons) -join "; ") })
+        Add-MetricEvent -ProjectId $Project -EventType "requeued"
     } else {
         $task.status = "done"
         $task.notes += ([ordered]@{ at = (Get-Timestamp); text = "AUTO-REVIEW: passed, moved to done." })
+        Add-MetricEvent -ProjectId $Project -EventType "done"
     }
+    Add-MetricEvent -ProjectId $Project -EventType "reviewed"
     $task.leaseUntil = $null
     $task.updatedAt = (Get-Timestamp)
     Write-JsonFile -Path $file -Data $task
     Write-Host "[OK] review decision: $TaskId -> $($task.status)" -ForegroundColor Green
+}
+
+function Invoke-Metrics {
+    $m = Get-Metrics
+    Write-Host ""
+    Write-Host "Metrics Totals" -ForegroundColor Cyan
+    Write-Host ("  created={0} dispatched={1} reviewed={2} done={3} requeued={4} blocked={5}" -f
+        $m.totals.created, $m.totals.dispatched, $m.totals.reviewed, $m.totals.done, $m.totals.requeued, $m.totals.blocked)
+    Write-Host ("  updatedAt={0}" -f $m.updatedAt) -ForegroundColor DarkGray
+    if ($Project) {
+        if ($m.projects.PSObject.Properties.Name -contains $Project) {
+            $p = $m.projects.$Project
+            Write-Host ""
+            Write-Host ("Project Metrics [{0}]" -f $Project) -ForegroundColor Cyan
+            Write-Host ("  created={0} dispatched={1} reviewed={2} done={3} requeued={4} blocked={5}" -f
+                $p.created, $p.dispatched, $p.reviewed, $p.done, $p.requeued, $p.blocked)
+        } else {
+            Write-Host ("No metrics for project: {0}" -f $Project) -ForegroundColor Yellow
+        }
+    }
 }
 
 function Invoke-Dashboard {
@@ -710,6 +817,7 @@ function Show-Help {
     Write-Host "  watchdog -Project <project-id> [-Interval 30] [-MaxRounds 0] [-LeaseMinutes 45]"
     Write-Host "  review -Project <project-id> -TaskId <id>"
     Write-Host "  dashboard -Project <project-id> [-ClaudeCount N]   # top main + bottom-left opencode + right stack"
+    Write-Host "  metrics [-Project <project-id>]"
     Write-Host "  check-ports"
     Write-Host "  quick-check"
     Write-Host "  e2e-check"
@@ -727,6 +835,7 @@ switch ($Command) {
     "watchdog"    { Invoke-Watchdog }
     "review"      { Invoke-Review }
     "dashboard"   { Invoke-Dashboard }
+    "metrics"     { Invoke-Metrics }
     "check-ports" { Invoke-CheckPorts }
     "quick-check" { Invoke-QuickCheck }
     "e2e-check"   { Invoke-E2ECheck }
