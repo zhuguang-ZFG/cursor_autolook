@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("help", "init", "new-project", "new-task", "set-task", "status", "next", "check-ports")]
+    [ValidateSet("help", "init", "new-project", "new-task", "set-task", "status", "next", "check-ports", "reconcile", "watchdog", "quick-check")]
     [string]$Command = "help",
 
     [string]$Name,
@@ -11,7 +11,10 @@ param(
     [string]$TaskId,
     [string]$Assignee = "DeepSeek",
     [string]$Reviewer = "GitHub gpt-5-mini",
-    [string]$Note
+    [string]$Note,
+    [int]$Interval = 30,
+    [int]$MaxRounds = 0,
+    [int]$LeaseMinutes = 45
 )
 
 $ErrorActionPreference = "Stop"
@@ -72,6 +75,31 @@ function Write-JsonFile {
 function Read-JsonFile {
     param([string]$Path)
     return (Get-Content -Path $Path -Raw | ConvertFrom-Json)
+}
+
+function Get-TaskFiles {
+    param([string]$ProjectId)
+    $p = Require-Project -ProjectId $ProjectId
+    return @(Get-ChildItem -Path (Join-Path $p.Dir "tasks") -Filter "*.json" -ErrorAction SilentlyContinue)
+}
+
+function Get-Tasks {
+    param([string]$ProjectId)
+    $taskFiles = Get-TaskFiles -ProjectId $ProjectId
+    $tasks = @()
+    foreach ($tf in $taskFiles) {
+        $tasks += Read-JsonFile -Path $tf.FullName
+    }
+    return @($tasks)
+}
+
+function Get-TaskFilePath {
+    param(
+        [string]$ProjectId,
+        [string]$TaskId
+    )
+    $p = Require-Project -ProjectId $ProjectId
+    return (Join-Path (Join-Path $p.Dir "tasks") "$TaskId.json")
 }
 
 function Invoke-Init {
@@ -161,6 +189,21 @@ function Invoke-SetTask {
     if (-not (Test-Path $file)) { throw "Task not found: $TaskId" }
 
     $task = Read-JsonFile -Path $file
+    if ($Status -eq "in_progress") {
+        $tasks = Get-Tasks -ProjectId $Project
+        $otherRunning = @($tasks | Where-Object { $_.status -eq "in_progress" -and $_.id -ne $TaskId })
+        if ($otherRunning.Count -gt 0) {
+            $runningIds = @($otherRunning | ForEach-Object { $_.id }) -join ", "
+            throw "Single-writer lock: already in_progress task(s): $runningIds"
+        }
+        if (-not $task.leaseUntil) {
+            $task | Add-Member -NotePropertyName leaseUntil -NotePropertyValue $null -Force
+        }
+        $task.leaseUntil = (Get-Date).AddMinutes($LeaseMinutes).ToString("yyyy-MM-ddTHH:mm:ssK")
+    }
+    if ($Status -ne "in_progress" -and $task.PSObject.Properties.Name -contains "leaseUntil") {
+        $task.leaseUntil = $null
+    }
     if ($Status) { $task.status = $Status }
     if (-not [string]::IsNullOrWhiteSpace($Note)) {
         $entry = [ordered]@{
@@ -221,6 +264,14 @@ function Invoke-Status {
         foreach ($g in $groups) {
             Write-Host ("  - {0}: {1}" -f $g.Name, $g.Count)
         }
+        $running = @($tasks | Where-Object { $_.status -eq "in_progress" })
+        if ($running.Count -gt 0) {
+            Write-Host "  - running:"
+            foreach ($r in $running) {
+                $lease = if ($r.PSObject.Properties.Name -contains "leaseUntil" -and $r.leaseUntil) { $r.leaseUntil } else { "-" }
+                Write-Host ("    * {0} ({1}) leaseUntil={2}" -f $r.id, $r.title, $lease) -ForegroundColor DarkGray
+            }
+        }
     }
 }
 
@@ -250,6 +301,86 @@ function Invoke-Next {
     Write-Host "  assignee: $($next.assignee)"
     Write-Host "  reviewer: $($next.reviewer)"
     Write-Host "  status:   $($next.status)"
+}
+
+function Invoke-Reconcile {
+    if ([string]::IsNullOrWhiteSpace($Project)) { throw "Please provide -Project" }
+    $tasks = Get-Tasks -ProjectId $Project
+    $now = Get-Date
+    $count = 0
+    foreach ($t in $tasks) {
+        if ($t.status -ne "in_progress") { continue }
+        if (-not ($t.PSObject.Properties.Name -contains "leaseUntil")) { continue }
+        if (-not $t.leaseUntil) { continue }
+        $lease = $null
+        if ([datetime]::TryParse([string]$t.leaseUntil, [ref]$lease) -and $lease -lt $now) {
+            $file = Get-TaskFilePath -ProjectId $Project -TaskId $t.id
+            $task = Read-JsonFile -Path $file
+            $task.status = "ready"
+            $task.leaseUntil = $null
+            if (-not ($task.PSObject.Properties.Name -contains "notes")) {
+                $task | Add-Member -NotePropertyName notes -NotePropertyValue @() -Force
+            }
+            $task.notes += ([ordered]@{
+                at = (Get-Timestamp)
+                text = "WATCHDOG: stale lease expired, moved back to ready."
+            })
+            $task.updatedAt = (Get-Timestamp)
+            Write-JsonFile -Path $file -Data $task
+            $count++
+        }
+    }
+    Write-Host "[OK] reconciled stale tasks: $count" -ForegroundColor Green
+}
+
+function Invoke-Watchdog {
+    if ([string]::IsNullOrWhiteSpace($Project)) { throw "Please provide -Project" }
+    $round = 0
+    Write-Host "Starting watchdog for project '$Project' (interval=${Interval}s, maxRounds=$MaxRounds)..." -ForegroundColor Cyan
+    while ($true) {
+        $round++
+        $stamp = Get-Date -Format "HH:mm:ss"
+        Invoke-Reconcile
+        $tasks = Get-Tasks -ProjectId $Project
+        $ready = @($tasks | Where-Object { $_.status -eq "ready" } | Sort-Object createdAt)
+        $running = @($tasks | Where-Object { $_.status -eq "in_progress" })
+        $review = @($tasks | Where-Object { $_.status -eq "in_review" })
+        $done = @($tasks | Where-Object { $_.status -eq "done" })
+        $blocked = @($tasks | Where-Object { $_.status -eq "blocked" })
+        Write-Host "[$stamp] round=$round ready=$($ready.Count) running=$($running.Count) in_review=$($review.Count) done=$($done.Count) blocked=$($blocked.Count)" -ForegroundColor DarkCyan
+
+        if ($running.Count -eq 0 -and $ready.Count -gt 0) {
+            $nextTask = $ready[0]
+            Write-Host ("  [dispatch] {0} - {1}" -f $nextTask.id, $nextTask.title) -ForegroundColor DarkGray
+            $file = Get-TaskFilePath -ProjectId $Project -TaskId $nextTask.id
+            $task = Read-JsonFile -Path $file
+            $task.status = "in_progress"
+            if (-not ($task.PSObject.Properties.Name -contains "leaseUntil")) {
+                $task | Add-Member -NotePropertyName leaseUntil -NotePropertyValue $null -Force
+            }
+            $task.leaseUntil = (Get-Date).AddMinutes($LeaseMinutes).ToString("yyyy-MM-ddTHH:mm:ssK")
+            if (-not ($task.PSObject.Properties.Name -contains "notes")) {
+                $task | Add-Member -NotePropertyName notes -NotePropertyValue @() -Force
+            }
+            $task.notes += ([ordered]@{
+                at = (Get-Timestamp)
+                text = "WATCHDOG: auto-dispatched by Cursor hub."
+            })
+            $task.updatedAt = (Get-Timestamp)
+            Write-JsonFile -Path $file -Data $task
+        }
+
+        if ($MaxRounds -gt 0 -and $round -ge $MaxRounds) {
+            Write-Host "Max rounds reached: $MaxRounds" -ForegroundColor Yellow
+            break
+        }
+
+        if ($ready.Count -eq 0 -and $running.Count -eq 0 -and $review.Count -eq 0) {
+            Write-Host "No runnable tasks left. Watchdog exit." -ForegroundColor Green
+            break
+        }
+        Start-Sleep -Seconds $Interval
+    }
 }
 
 function Invoke-CheckPorts {
@@ -284,6 +415,35 @@ function Invoke-CheckPorts {
     Write-Host "[OK] No overlap with autolook/deepseek_autolook port range." -ForegroundColor Green
 }
 
+function Invoke-QuickCheck {
+    $failed = 0
+    $passed = 0
+    Write-Host "Running quick self-check..." -ForegroundColor Cyan
+
+    $scriptFiles = @(
+        (Join-Path $Root "cursor-autolook.ps1")
+    )
+    foreach ($f in $scriptFiles) {
+        $tokens = $null
+        $errors = $null
+        [System.Management.Automation.Language.Parser]::ParseFile($f, [ref]$tokens, [ref]$errors) | Out-Null
+        if ($errors.Count -eq 0) { $passed++ } else { $failed++; Write-Host "  FAIL syntax: $f" -ForegroundColor Red }
+    }
+
+    try {
+        Invoke-CheckPorts | Out-Null
+        $passed++
+    } catch {
+        $failed++
+        Write-Host "  FAIL ports: $_" -ForegroundColor Red
+    }
+
+    if (Test-Path $ProjectsDir) { $passed++ } else { $failed++; Write-Host "  FAIL runtime projects dir missing" -ForegroundColor Red }
+
+    Write-Host ("Quick check: passed={0} failed={1}" -f $passed, $failed) -ForegroundColor $(if ($failed -eq 0) { "Green" } else { "Yellow" })
+    if ($failed -gt 0) { exit 1 }
+}
+
 function Show-Help {
     Write-Host ""
     Write-Host "Cursor Autolook — Cursor as execution hub" -ForegroundColor Cyan
@@ -295,7 +455,10 @@ function Show-Help {
     Write-Host "  set-task -Project <project-id> -TaskId <id> [-Status ready|in_progress|in_review|done|blocked] [-Note ...]"
     Write-Host "  status"
     Write-Host "  next -Project <project-id>"
+    Write-Host "  reconcile -Project <project-id>"
+    Write-Host "  watchdog -Project <project-id> [-Interval 30] [-MaxRounds 0] [-LeaseMinutes 45]"
     Write-Host "  check-ports"
+    Write-Host "  quick-check"
     Write-Host ""
 }
 
@@ -306,6 +469,9 @@ switch ($Command) {
     "set-task"    { Invoke-SetTask }
     "status"      { Invoke-Status }
     "next"        { Invoke-Next }
+    "reconcile"   { Invoke-Reconcile }
+    "watchdog"    { Invoke-Watchdog }
     "check-ports" { Invoke-CheckPorts }
+    "quick-check" { Invoke-QuickCheck }
     default       { Show-Help }
 }

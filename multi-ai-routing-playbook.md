@@ -84,6 +84,9 @@
 - 异常路径：
   - `in_progress` -> `blocked`
   - `in_review` -> `ready` (返工)
+- 中枢守护：
+  - `watchdog` 自动分派下一个 `ready`
+  - `reconcile` 自动回收租约过期的 `in_progress`
 
 ## Do Not
 
