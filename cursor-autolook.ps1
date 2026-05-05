@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("help", "init", "new-project", "new-task", "set-task", "status", "next", "check-ports", "reconcile", "watchdog", "quick-check")]
+    [ValidateSet("help", "init", "new-project", "new-task", "set-task", "status", "next", "check-ports", "reconcile", "watchdog", "review", "dashboard", "quick-check", "e2e-check")]
     [string]$Command = "help",
 
     [string]$Name,
@@ -370,6 +370,33 @@ function Invoke-Watchdog {
             Write-JsonFile -Path $file -Data $task
         }
 
+        # Auto review gate: in_review -> done/ready
+        foreach ($t in $review) {
+            $file = Get-TaskFilePath -ProjectId $Project -TaskId $t.id
+            $task = Read-JsonFile -Path $file
+            if (-not ($task.PSObject.Properties.Name -contains "notes")) {
+                $task | Add-Member -NotePropertyName notes -NotePropertyValue @() -Force
+            }
+            $text = @($task.notes | ForEach-Object { [string]$_.text }) -join " "
+            if ($text -match "(?i)(fail|bug|missing|regression|blocked)") {
+                $task.status = "ready"
+                $task.notes += ([ordered]@{
+                    at = (Get-Timestamp)
+                    text = "AUTO-REVIEW: issues found, moved back to ready."
+                })
+            } else {
+                $task.status = "done"
+                $task.notes += ([ordered]@{
+                    at = (Get-Timestamp)
+                    text = "AUTO-REVIEW: passed, moved to done."
+                })
+            }
+            $task.leaseUntil = $null
+            $task.updatedAt = (Get-Timestamp)
+            Write-JsonFile -Path $file -Data $task
+            Write-Host ("  [review] {0} -> {1}" -f $t.id, $task.status) -ForegroundColor DarkGray
+        }
+
         if ($MaxRounds -gt 0 -and $round -ge $MaxRounds) {
             Write-Host "Max rounds reached: $MaxRounds" -ForegroundColor Yellow
             break
@@ -381,6 +408,54 @@ function Invoke-Watchdog {
         }
         Start-Sleep -Seconds $Interval
     }
+}
+
+function Invoke-Review {
+    if ([string]::IsNullOrWhiteSpace($Project)) { throw "Please provide -Project" }
+    if ([string]::IsNullOrWhiteSpace($TaskId)) { throw "Please provide -TaskId" }
+    $file = Get-TaskFilePath -ProjectId $Project -TaskId $TaskId
+    if (-not (Test-Path $file)) { throw "Task not found: $TaskId" }
+    $task = Read-JsonFile -Path $file
+    if ($task.status -ne "in_review") { throw "Task is not in_review: $TaskId" }
+    if (-not ($task.PSObject.Properties.Name -contains "notes")) {
+        $task | Add-Member -NotePropertyName notes -NotePropertyValue @() -Force
+    }
+    $text = @($task.notes | ForEach-Object { [string]$_.text }) -join " "
+    if ($text -match "(?i)(fail|bug|missing|regression|blocked)") {
+        $task.status = "ready"
+        $task.notes += ([ordered]@{ at = (Get-Timestamp); text = "AUTO-REVIEW: issues found, moved back to ready." })
+    } else {
+        $task.status = "done"
+        $task.notes += ([ordered]@{ at = (Get-Timestamp); text = "AUTO-REVIEW: passed, moved to done." })
+    }
+    $task.leaseUntil = $null
+    $task.updatedAt = (Get-Timestamp)
+    Write-JsonFile -Path $file -Data $task
+    Write-Host "[OK] review decision: $TaskId -> $($task.status)" -ForegroundColor Green
+}
+
+function Invoke-Dashboard {
+    if ([string]::IsNullOrWhiteSpace($Project)) { throw "Please provide -Project" }
+    Invoke-Init
+
+    $wt = Get-Command wt -ErrorAction SilentlyContinue
+    if (-not $wt) {
+        throw "Windows Terminal (wt) not found. Please install Windows Terminal first."
+    }
+
+    $rootEscaped = $Root.Replace("'", "''")
+    $projectEscaped = $Project.Replace("'", "''")
+
+    $leftCmd = "cd '$rootEscaped'; while (`$true) { Clear-Host; powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 status; Start-Sleep -Seconds 5 }"
+    $centerCmd = "cd '$rootEscaped'; Write-Host '=== Cursor Hub (C 位) ===' -ForegroundColor Cyan; Write-Host '建议在本窗执行 Cursor 会话。'; Write-Host '例如: cursor .'; Write-Host ''; powershell -NoExit"
+    $rightCmd = "cd '$rootEscaped'; powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 watchdog -Project '$projectEscaped' -Interval 10"
+
+    & wt `
+        new-tab --title "Cursor Hub" powershell -NoExit -Command $centerCmd `
+        ";" split-pane -H --size 0.25 --title "Status" powershell -NoExit -Command $leftCmd `
+        ";" split-pane -H --size 0.33 --title "Watchdog" powershell -NoExit -Command $rightCmd | Out-Null
+
+    Write-Host "[OK] dashboard launched: left=Status, center=Cursor Hub, right=Watchdog" -ForegroundColor Green
 }
 
 function Invoke-CheckPorts {
@@ -444,6 +519,42 @@ function Invoke-QuickCheck {
     if ($failed -gt 0) { exit 1 }
 }
 
+function Invoke-E2ECheck {
+    Invoke-Init
+    $testProject = "e2e-check-" + (Get-Date -Format "yyyyMMddHHmmss")
+    $taskTitle = "e2e task"
+    Write-Host "Running end-to-end check project: $testProject" -ForegroundColor Cyan
+
+    $script:Name = $testProject
+    Invoke-NewProject
+
+    $script:Project = $testProject
+    $script:Title = $taskTitle
+    Invoke-NewTask
+
+    $tasks = @(Get-Tasks -ProjectId $testProject)
+    if ($tasks.Count -ne 1) { throw "E2E failed: task create failed" }
+    $tid = $tasks[0].id
+
+    $script:Project = $testProject
+    $script:Interval = 1
+    $script:MaxRounds = 1
+    Invoke-Watchdog
+
+    $script:TaskId = $tid
+    $script:Status = "in_review"
+    $script:Note = "looks good"
+    Invoke-SetTask
+
+    $script:TaskId = $tid
+    Invoke-Review
+
+    $final = Read-JsonFile -Path (Get-TaskFilePath -ProjectId $testProject -TaskId $tid)
+    if ($final.status -ne "done") { throw "E2E failed: final status is $($final.status), expected done" }
+
+    Write-Host "[OK] E2E check passed: ready -> in_progress -> in_review -> done" -ForegroundColor Green
+}
+
 function Show-Help {
     Write-Host ""
     Write-Host "Cursor Autolook — Cursor as execution hub" -ForegroundColor Cyan
@@ -457,8 +568,11 @@ function Show-Help {
     Write-Host "  next -Project <project-id>"
     Write-Host "  reconcile -Project <project-id>"
     Write-Host "  watchdog -Project <project-id> [-Interval 30] [-MaxRounds 0] [-LeaseMinutes 45]"
+    Write-Host "  review -Project <project-id> -TaskId <id>"
+    Write-Host "  dashboard -Project <project-id>"
     Write-Host "  check-ports"
     Write-Host "  quick-check"
+    Write-Host "  e2e-check"
     Write-Host ""
 }
 
@@ -471,7 +585,10 @@ switch ($Command) {
     "next"        { Invoke-Next }
     "reconcile"   { Invoke-Reconcile }
     "watchdog"    { Invoke-Watchdog }
+    "review"      { Invoke-Review }
+    "dashboard"   { Invoke-Dashboard }
     "check-ports" { Invoke-CheckPorts }
     "quick-check" { Invoke-QuickCheck }
+    "e2e-check"   { Invoke-E2ECheck }
     default       { Show-Help }
 }

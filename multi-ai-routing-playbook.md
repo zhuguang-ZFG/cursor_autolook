@@ -87,6 +87,7 @@
 - 中枢守护：
   - `watchdog` 自动分派下一个 `ready`
   - `reconcile` 自动回收租约过期的 `in_progress`
+  - `review` 自动把 `in_review` 判定为 `done/ready`
 
 ## Do Not
 

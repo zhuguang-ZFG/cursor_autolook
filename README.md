@@ -39,8 +39,17 @@ powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 reconcile -Projec
 # 启动自动编排循环（watchdog）
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 watchdog -Project my-project -Interval 20
 
+# 启动命令行分屏中枢（Cursor 在中间 C 位）
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 dashboard -Project my-project
+
+# 执行自动审查决策（in_review -> done/ready）
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 review -Project my-project -TaskId <task-id>
+
 # 一键快速自检
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 quick-check
+
+# 一键端到端闭环验证
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 e2e-check
 
 # 更新任务状态
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 set-task -Project my-project -TaskId <task-id> -Status in_review
@@ -67,6 +76,7 @@ runtime/
 4. 执行完成后标记 `in_review`，由 reviewer 复核。
 5. reviewer 通过后改为 `done`，失败则回到 `ready` 或 `blocked`。
 6. 若任务卡死，运行 `reconcile`；若想持续自动推进，运行 `watchdog`。
+7. 需要自动判定时，运行 `review`；发布前用 `e2e-check` 做闭环验收。
 
 ## 命令说明
 
@@ -78,8 +88,11 @@ runtime/
 - `next`：挑选下一个可执行任务（`ready`）。
 - `reconcile`：把过期 `in_progress`（租约超时）任务回退到 `ready`。
 - `watchdog`：自动编排循环（调和 + 自动分派下一个 `ready` 任务）。
+- `review`：自动审查决策（`in_review` -> `done/ready`）。
+- `dashboard`：命令行分屏中枢（左状态/中 Cursor Hub/右 watchdog）。
 - `check-ports`：检查当前端口规划是否与其它仓库冲突。
 - `quick-check`：一键快速健康检查（语法/端口/运行目录）。
+- `e2e-check`：一键端到端闭环验证（创建项目并跑完整状态流转）。
 
 ## 端口规划
 
