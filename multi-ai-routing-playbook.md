@@ -7,6 +7,7 @@
 - Cursor session is the orchestrator and final integration point.
 - Workers cannot self-certify completion; reviewer decides `done`.
 - Cheap-first, quality-gated escalation.
+- Port isolation by repo: `cursor_autolook` uses `16121-16160`, never reuse `15921-15960`.
 
 ## Role Mapping
 

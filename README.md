@@ -10,6 +10,7 @@
 - Cursor 为中枢：任务调度、执行指令、结果汇总都由 Cursor 会话驱动。
 - 审查后完成：执行者不能自证完成，必须经过 reviewer 才能标记 done。
 - 便宜优先：先用廉价模型做扫描，重推理和最终审查再升级模型。
+- 端口隔离：本仓库固定使用 `16121-16160`，避开另外两仓常用段 `15921-15960`。
 
 ## 快速开始
 
@@ -28,6 +29,9 @@ powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 new-task -Project
 
 # 查看状态
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 status
+
+# 检查端口是否与其它仓冲突
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 check-ports
 
 # 更新任务状态
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 set-task -Project my-project -TaskId <task-id> -Status in_review
@@ -62,6 +66,17 @@ runtime/
 - `set-task`：更新任务状态和备注。
 - `status`：输出项目与任务总览。
 - `next`：挑选下一个可执行任务（`ready`）。
+- `check-ports`：检查当前端口规划是否与其它仓库冲突。
+
+## 端口规划
+
+- 本仓保留端口段：`16121-16160`
+- 避让端口段：`15921-15960`（`autolook` / `deepseek_autolook` 已占用）
+- 默认分配：
+  - hub: `16121`
+  - api: `16122`
+  - dashboard: `16123`
+  - reviewer: `16124`
 
 ## 仓库地址
 

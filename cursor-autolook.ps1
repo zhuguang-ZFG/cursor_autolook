@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("help", "init", "new-project", "new-task", "set-task", "status", "next")]
+    [ValidateSet("help", "init", "new-project", "new-task", "set-task", "status", "next", "check-ports")]
     [string]$Command = "help",
 
     [string]$Name,
@@ -18,6 +18,11 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSCommandPath
 $RuntimeDir = Join-Path $Root "runtime"
 $ProjectsDir = Join-Path $RuntimeDir "projects"
+$PortsFile = Join-Path $RuntimeDir "ports.json"
+$ReservedPortStart = 16121
+$ReservedPortEnd = 16160
+$KnownConflictStart = 15921
+$KnownConflictEnd = 15960
 
 function Ensure-Directory {
     param([string]$Path)
@@ -72,6 +77,28 @@ function Read-JsonFile {
 function Invoke-Init {
     Ensure-Directory $RuntimeDir
     Ensure-Directory $ProjectsDir
+    if (-not (Test-Path $PortsFile)) {
+        $ports = [ordered]@{
+            owner = "cursor_autolook"
+            reservedRange = @{
+                start = $ReservedPortStart
+                end = $ReservedPortEnd
+            }
+            knownConflictRange = @{
+                start = $KnownConflictStart
+                end = $KnownConflictEnd
+            }
+            defaults = @{
+                hub = $ReservedPortStart
+                api = ($ReservedPortStart + 1)
+                dashboard = ($ReservedPortStart + 2)
+                reviewer = ($ReservedPortStart + 3)
+            }
+            createdAt = (Get-Timestamp)
+            updatedAt = (Get-Timestamp)
+        }
+        Write-JsonFile -Path $PortsFile -Data $ports
+    }
     Write-Host "[OK] runtime initialized at $RuntimeDir" -ForegroundColor Green
 }
 
@@ -154,6 +181,18 @@ function Invoke-Status {
         return
     }
 
+    Write-Host ""
+    Write-Host "Port Plan" -ForegroundColor Cyan
+    if (Test-Path $PortsFile) {
+        $ports = Read-JsonFile -Path $PortsFile
+        Write-Host ("  - reserved: {0}-{1}" -f $ports.reservedRange.start, $ports.reservedRange.end)
+        Write-Host ("  - avoid:    {0}-{1}" -f $ports.knownConflictRange.start, $ports.knownConflictRange.end)
+        Write-Host ("  - hub/api/dashboard/reviewer: {0}/{1}/{2}/{3}" -f $ports.defaults.hub, $ports.defaults.api, $ports.defaults.dashboard, $ports.defaults.reviewer)
+    } else {
+        Write-Host ("  - reserved: {0}-{1}" -f $ReservedPortStart, $ReservedPortEnd)
+        Write-Host ("  - avoid:    {0}-{1}" -f $KnownConflictStart, $KnownConflictEnd)
+    }
+
     $projectDirs = Get-ChildItem -Path $ProjectsDir -Directory -ErrorAction SilentlyContinue
     if (-not $projectDirs) {
         Write-Host "No projects yet." -ForegroundColor Yellow
@@ -213,6 +252,38 @@ function Invoke-Next {
     Write-Host "  status:   $($next.status)"
 }
 
+function Invoke-CheckPorts {
+    Invoke-Init
+    $ports = Read-JsonFile -Path $PortsFile
+    $reservedStart = [int]$ports.reservedRange.start
+    $reservedEnd = [int]$ports.reservedRange.end
+    $conflictStart = [int]$ports.knownConflictRange.start
+    $conflictEnd = [int]$ports.knownConflictRange.end
+
+    Write-Host "Checking port policy..." -ForegroundColor Cyan
+    Write-Host ("  reserved: {0}-{1}" -f $reservedStart, $reservedEnd)
+    Write-Host ("  avoid:    {0}-{1}" -f $conflictStart, $conflictEnd)
+
+    if (($reservedStart -le $conflictEnd) -and ($reservedEnd -ge $conflictStart)) {
+        throw "Reserved port range overlaps with known conflict range."
+    }
+
+    $samplePorts = @(
+        [int]$ports.defaults.hub,
+        [int]$ports.defaults.api,
+        [int]$ports.defaults.dashboard,
+        [int]$ports.defaults.reviewer
+    )
+
+    foreach ($p in $samplePorts) {
+        if (($p -ge $conflictStart) -and ($p -le $conflictEnd)) {
+            throw "Default port $p conflicts with reserved range used by other repos."
+        }
+    }
+
+    Write-Host "[OK] No overlap with autolook/deepseek_autolook port range." -ForegroundColor Green
+}
+
 function Show-Help {
     Write-Host ""
     Write-Host "Cursor Autolook — Cursor as execution hub" -ForegroundColor Cyan
@@ -224,6 +295,7 @@ function Show-Help {
     Write-Host "  set-task -Project <project-id> -TaskId <id> [-Status ready|in_progress|in_review|done|blocked] [-Note ...]"
     Write-Host "  status"
     Write-Host "  next -Project <project-id>"
+    Write-Host "  check-ports"
     Write-Host ""
 }
 
@@ -234,5 +306,6 @@ switch ($Command) {
     "set-task"    { Invoke-SetTask }
     "status"      { Invoke-Status }
     "next"        { Invoke-Next }
+    "check-ports" { Invoke-CheckPorts }
     default       { Show-Help }
 }
