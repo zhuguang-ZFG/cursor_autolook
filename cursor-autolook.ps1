@@ -448,14 +448,16 @@ function Invoke-Dashboard {
 
     $leftCmd = "cd '$rootEscaped'; while (`$true) { Clear-Host; powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 status; Start-Sleep -Seconds 5 }"
     $centerCmd = "cd '$rootEscaped'; Write-Host '=== Cursor Hub (C 位) ===' -ForegroundColor Cyan; Write-Host '建议在本窗执行 Cursor 会话。'; Write-Host '例如: cursor .'; Write-Host ''; powershell -NoExit"
-    $rightCmd = "cd '$rootEscaped'; powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 watchdog -Project '$projectEscaped' -Interval 10"
+    $rightTopCmd = "cd '$rootEscaped'; powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 watchdog -Project '$projectEscaped' -Interval 10"
+    $rightBottomCmd = "cd '$rootEscaped'; while (`$true) { Clear-Host; Write-Host '=== Review Queue ===' -ForegroundColor Cyan; `$tasks = Get-ChildItem -Path '.\runtime\projects\$projectEscaped\tasks' -Filter '*.json' -ErrorAction SilentlyContinue; if (-not `$tasks) { Write-Host 'no tasks' -ForegroundColor DarkGray } else { foreach (`$f in `$tasks) { `$t = Get-Content `$f.FullName -Raw | ConvertFrom-Json; if (`$t.status -eq 'in_review') { Write-Host ('[{0}] {1}' -f `$t.id, `$t.title) -ForegroundColor Yellow } } }; Start-Sleep -Seconds 5 }"
 
     & wt `
         new-tab --title "Cursor Hub" powershell -NoExit -Command $centerCmd `
         ";" split-pane -H --size 0.25 --title "Status" powershell -NoExit -Command $leftCmd `
-        ";" split-pane -H --size 0.33 --title "Watchdog" powershell -NoExit -Command $rightCmd | Out-Null
+        ";" split-pane -H --size 0.33 --title "Watchdog" powershell -NoExit -Command $rightTopCmd `
+        ";" split-pane -V --size 0.50 --title "Review Queue" powershell -NoExit -Command $rightBottomCmd | Out-Null
 
-    Write-Host "[OK] dashboard launched: left=Status, center=Cursor Hub, right=Watchdog" -ForegroundColor Green
+    Write-Host "[OK] dashboard launched: left=Status, center=Cursor Hub, right-top=Watchdog, right-bottom=Review Queue" -ForegroundColor Green
 }
 
 function Invoke-CheckPorts {
@@ -569,7 +571,7 @@ function Show-Help {
     Write-Host "  reconcile -Project <project-id>"
     Write-Host "  watchdog -Project <project-id> [-Interval 30] [-MaxRounds 0] [-LeaseMinutes 45]"
     Write-Host "  review -Project <project-id> -TaskId <id>"
-    Write-Host "  dashboard -Project <project-id>"
+    Write-Host "  dashboard -Project <project-id>   # 4-pane: Status | Cursor Hub | Watchdog | Review Queue"
     Write-Host "  check-ports"
     Write-Host "  quick-check"
     Write-Host "  e2e-check"

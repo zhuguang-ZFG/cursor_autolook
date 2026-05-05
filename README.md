@@ -39,7 +39,7 @@ powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 reconcile -Projec
 # 启动自动编排循环（watchdog）
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 watchdog -Project my-project -Interval 20
 
-# 启动命令行分屏中枢（Cursor 在中间 C 位）
+# 启动命令行分屏中枢（4 屏，Cursor 在中间 C 位）
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 dashboard -Project my-project
 
 # 执行自动审查决策（in_review -> done/ready）
@@ -89,7 +89,7 @@ runtime/
 - `reconcile`：把过期 `in_progress`（租约超时）任务回退到 `ready`。
 - `watchdog`：自动编排循环（调和 + 自动分派下一个 `ready` 任务）。
 - `review`：自动审查决策（`in_review` -> `done/ready`）。
-- `dashboard`：命令行分屏中枢（左状态/中 Cursor Hub/右 watchdog）。
+- `dashboard`：命令行 4 分屏中枢（左状态/中 Cursor Hub/右上 watchdog/右下 review queue）。
 - `check-ports`：检查当前端口规划是否与其它仓库冲突。
 - `quick-check`：一键快速健康检查（语法/端口/运行目录）。
 - `e2e-check`：一键端到端闭环验证（创建项目并跑完整状态流转）。
