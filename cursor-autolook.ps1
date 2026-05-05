@@ -446,18 +446,25 @@ function Invoke-Dashboard {
     $rootEscaped = $Root.Replace("'", "''")
     $projectEscaped = $Project.Replace("'", "''")
 
-    $leftCmd = "cd '$rootEscaped'; while (`$true) { Clear-Host; powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 status; Start-Sleep -Seconds 5 }"
-    $centerCmd = "cd '$rootEscaped'; Write-Host '=== Cursor Hub (C 位) ===' -ForegroundColor Cyan; Write-Host '建议在本窗执行 Cursor 会话。'; Write-Host '例如: cursor .'; Write-Host ''; powershell -NoExit"
-    $rightTopCmd = "cd '$rootEscaped'; powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 watchdog -Project '$projectEscaped' -Interval 10"
-    $rightBottomCmd = "cd '$rootEscaped'; while (`$true) { Clear-Host; Write-Host '=== Review Queue ===' -ForegroundColor Cyan; `$tasks = Get-ChildItem -Path '.\runtime\projects\$projectEscaped\tasks' -Filter '*.json' -ErrorAction SilentlyContinue; if (-not `$tasks) { Write-Host 'no tasks' -ForegroundColor DarkGray } else { foreach (`$f in `$tasks) { `$t = Get-Content `$f.FullName -Raw | ConvertFrom-Json; if (`$t.status -eq 'in_review') { Write-Host ('[{0}] {1}' -f `$t.id, `$t.title) -ForegroundColor Yellow } } }; Start-Sleep -Seconds 5 }"
+    $centerCmd = "cd '$rootEscaped'; Write-Host '=== Cursor (C 位) ===' -ForegroundColor Cyan; if (Get-Command cursor -ErrorAction SilentlyContinue) { cursor . } else { Write-Host 'cursor command not found, use this pane as Cursor hub.' -ForegroundColor Yellow; powershell -NoExit }"
+    $leftCmd = "cd '$rootEscaped'; Write-Host '=== DeepSeek-TUI ===' -ForegroundColor Cyan; if (Get-Command deepseek -ErrorAction SilentlyContinue) { deepseek } else { Write-Host 'deepseek command not found.' -ForegroundColor Yellow; powershell -NoExit }"
+    $rightCmd = "cd '$rootEscaped'; Write-Host '=== OpenCode ===' -ForegroundColor Cyan; if (Get-Command opencode -ErrorAction SilentlyContinue) { opencode } else { Write-Host 'opencode command not found.' -ForegroundColor Yellow; powershell -NoExit }"
+    $bottomLeftCmd = "cd '$rootEscaped'; Write-Host '=== Claude-1 ===' -ForegroundColor Cyan; if (Get-Command claude -ErrorAction SilentlyContinue) { claude } else { Write-Host 'claude command not found.' -ForegroundColor Yellow; powershell -NoExit }"
+    $bottomMidCmd = "cd '$rootEscaped'; Write-Host '=== Claude-2 ===' -ForegroundColor Cyan; if (Get-Command claude -ErrorAction SilentlyContinue) { claude } else { Write-Host 'claude command not found.' -ForegroundColor Yellow; powershell -NoExit }"
+    $bottomRightCmd = "cd '$rootEscaped'; Write-Host '=== Claude-3 (review) ===' -ForegroundColor Cyan; if (Get-Command claude -ErrorAction SilentlyContinue) { claude } else { Write-Host 'claude command not found.' -ForegroundColor Yellow; powershell -NoExit }"
 
     & wt `
         new-tab --title "Cursor Hub" powershell -NoExit -Command $centerCmd `
-        ";" split-pane -H --size 0.25 --title "Status" powershell -NoExit -Command $leftCmd `
-        ";" split-pane -H --size 0.33 --title "Watchdog" powershell -NoExit -Command $rightTopCmd `
-        ";" split-pane -V --size 0.50 --title "Review Queue" powershell -NoExit -Command $rightBottomCmd | Out-Null
+        ";" split-pane -H --size 0.30 --title "DeepSeek-TUI" powershell -NoExit -Command $leftCmd `
+        ";" split-pane -H --size 0.50 --title "OpenCode" powershell -NoExit -Command $rightCmd `
+        ";" focus-pane -t 0 `
+        ";" split-pane -V --size 0.60 --title "Claude-1" powershell -NoExit -Command $bottomLeftCmd `
+        ";" focus-pane -t 1 `
+        ";" split-pane -V --size 0.60 --title "Claude-2" powershell -NoExit -Command $bottomMidCmd `
+        ";" focus-pane -t 2 `
+        ";" split-pane -V --size 0.60 --title "Claude-3" powershell -NoExit -Command $bottomRightCmd | Out-Null
 
-    Write-Host "[OK] dashboard launched: left=Status, center=Cursor Hub, right-top=Watchdog, right-bottom=Review Queue" -ForegroundColor Green
+    Write-Host "[OK] dashboard launched: top=DeepSeek/Cursor/OpenCode, bottom=Claude-1/2/3" -ForegroundColor Green
 }
 
 function Invoke-CheckPorts {
@@ -571,7 +578,7 @@ function Show-Help {
     Write-Host "  reconcile -Project <project-id>"
     Write-Host "  watchdog -Project <project-id> [-Interval 30] [-MaxRounds 0] [-LeaseMinutes 45]"
     Write-Host "  review -Project <project-id> -TaskId <id>"
-    Write-Host "  dashboard -Project <project-id>   # 4-pane: Status | Cursor Hub | Watchdog | Review Queue"
+    Write-Host "  dashboard -Project <project-id>   # 6-pane: DeepSeek | Cursor | OpenCode + 3 Claude"
     Write-Host "  check-ports"
     Write-Host "  quick-check"
     Write-Host "  e2e-check"
