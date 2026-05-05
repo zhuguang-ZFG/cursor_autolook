@@ -30,6 +30,9 @@ powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 new-task -Project
 # 新建带验收契约的任务（产物 + 测试命令 + 最大重试）
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 new-task -Project my-project -Title "修复登录" -Artifacts "src/auth/login.ts,tests/auth.spec.ts" -TestCommand "npm test -- tests/auth.spec.ts" -MaxAttempts 3
 
+# 指定任务类型（命中对应缓存模板）
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 new-task -Project my-project -Title "重构用户模块" -TaskType refactor
+
 # 查看状态
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 status
 
@@ -99,6 +102,7 @@ runtime/
 - `new-project`：创建项目。
 - `new-task`：创建任务。
 - `new-task`：支持任务契约（`-Artifacts`、`-TestCommand`、`-MaxAttempts`）。
+- `new-task`：支持任务类型模板（`-TaskType bugfix|refactor|review|general`，不传则自动识别）。
 - `set-task`：更新任务状态和备注。
 - `status`：输出项目与任务总览。
 - `next`：挑选下一个可执行任务（`ready`）。
@@ -119,6 +123,7 @@ runtime/
 - 已实现：自动调度、自动回收、自动审查、验收门、失败重试上限熔断（超限 `blocked`）。
 - 已实现：告警钩子（写入 `runtime/alerts.log`，可选 `AUTOLOOK_ALERT_WEBHOOK` 推送）。
 - 已实现：提示词缓存（静态前缀 + 动态后缀哈希，记录 `cacheHit/cacheMiss`）。
+- 已实现：按任务类型的缓存模板版本化（`bugfix/refactor/review/general`）。
 
 ## 端口规划
 

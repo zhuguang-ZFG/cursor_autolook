@@ -14,6 +14,7 @@ param(
     [string]$Note,
     [string]$Artifacts,
     [string]$TestCommand,
+    [string]$TaskType,
     [int]$Interval = 30,
     [int]$MaxRounds = 0,
     [int]$LeaseMinutes = 45,
@@ -29,7 +30,6 @@ $PortsFile = Join-Path $RuntimeDir "ports.json"
 $MetricsFile = Join-Path $RuntimeDir "metrics.json"
 $AlertsLogFile = Join-Path $RuntimeDir "alerts.log"
 $PromptCacheDir = Join-Path $RuntimeDir "prompt-cache"
-$PromptPrefixFile = Join-Path $PromptCacheDir "static-prefix-v1.md"
 $ReservedPortStart = 16121
 $ReservedPortEnd = 16160
 $KnownConflictStart = 15921
@@ -50,6 +50,22 @@ function Parse-ListArg {
     param([string]$Value)
     if ([string]::IsNullOrWhiteSpace($Value)) { return @() }
     return @($Value.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+}
+
+function Resolve-TaskType {
+    param(
+        [string]$RawType,
+        [string]$Title
+    )
+    if (-not [string]::IsNullOrWhiteSpace($RawType)) {
+        $v = $RawType.Trim().ToLowerInvariant()
+        if ($v -in @("bugfix", "refactor", "review", "general")) { return $v }
+    }
+    $t = if ($Title) { $Title.ToLowerInvariant() } else { "" }
+    if ($t -match "fix|bug|hotfix|crash|error") { return "bugfix" }
+    if ($t -match "refactor|cleanup|restructure") { return "refactor" }
+    if ($t -match "review|audit|check") { return "review" }
+    return "general"
 }
 
 function New-Slug {
@@ -155,21 +171,53 @@ function Add-MetricEvent {
 }
 
 function Get-PromptPrefix {
+    param([string]$TaskType = "general")
     Ensure-Directory $PromptCacheDir
-    if (-not (Test-Path $PromptPrefixFile)) {
-        $prefix = @"
+    $type = Resolve-TaskType -RawType $TaskType -Title ""
+    $file = Join-Path $PromptCacheDir ("static-prefix-{0}-v1.md" -f $type)
+    if (-not (Test-Path $file)) {
+        $prefix = switch ($type) {
+            "bugfix" {@"
+You are a bugfix worker in a cost-sensitive multi-agent workflow.
+Rules:
+1) Reproduce hypothesis quickly and isolate root cause.
+2) Patch minimally; avoid broad refactors.
+3) Add/adjust focused tests for regression proof.
+4) Keep output concise and evidence-driven.
+"@}
+            "refactor" {@"
+You are a refactor worker in a cost-sensitive multi-agent workflow.
+Rules:
+1) Preserve behavior; improve structure/readability.
+2) Keep changes scoped and reversible.
+3) Avoid hidden feature additions.
+4) Provide concise rationale for changed boundaries.
+"@}
+            "review" {@"
+You are a review worker in a cost-sensitive multi-agent workflow.
+Rules:
+1) Prioritize bugs, regressions, and missing tests.
+2) Be concise and severity-oriented.
+3) Do not rewrite design unless necessary.
+4) Provide clear next actions.
+"@}
+            default {@"
 You are a coding worker in a cost-sensitive multi-agent workflow.
-
 Rules:
 1) Keep output concise and actionable.
 2) Reuse existing context; avoid repeating large unchanged explanations.
 3) Provide only task-relevant findings and next steps.
 4) Prefer minimal diffs and focused edits.
 5) If uncertain, ask one concrete question.
-"@
-        Set-Content -Path $PromptPrefixFile -Value $prefix -Encoding UTF8
+"@}
+        }
+        Set-Content -Path $file -Value $prefix -Encoding UTF8
     }
-    return (Get-Content -Path $PromptPrefixFile -Raw)
+    return [pscustomobject]@{
+        type = $type
+        file = $file
+        text = (Get-Content -Path $file -Raw)
+    }
 }
 
 function Build-DynamicTaskSuffix {
@@ -216,10 +264,11 @@ function Invoke-PrepBrief {
     if (-not (Test-Path $taskFile)) { throw "Task not found: $TaskId" }
 
     Ensure-Directory $PromptCacheDir
-    $prefix = Get-PromptPrefix
     $task = Read-JsonFile -Path $taskFile
+    $taskType = if ($task.PSObject.Properties.Name -contains "taskType") { [string]$task.taskType } else { "general" }
+    $prefixObj = Get-PromptPrefix -TaskType $taskType
     $dynamic = Build-DynamicTaskSuffix -ProjectId $Project -TaskData $task
-    $keySource = ($dynamic + "`n" + (Get-Content -Path $PromptPrefixFile -Raw))
+    $keySource = ($dynamic + "`n" + $prefixObj.text)
     $hash = (Get-FileHash -InputStream ([System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($keySource))) -Algorithm SHA256).Hash
     $cacheFile = Get-TaskCacheFile -ProjectId $Project -TaskId $TaskId
     $briefFile = Join-Path (Split-Path -Parent $cacheFile) "$TaskId.brief.md"
@@ -236,10 +285,11 @@ function Invoke-PrepBrief {
         Add-MetricEvent -ProjectId $Project -EventType "cacheHit"
         Write-Host "[CACHE HIT] brief unchanged: $briefFile" -ForegroundColor Green
     } else {
-        $brief = $prefix + "`n`n---`n`n" + $dynamic
+        $brief = $prefixObj.text + "`n`n---`n`n" + $dynamic
         Set-Content -Path $briefFile -Value $brief -Encoding UTF8
         Write-JsonFile -Path $cacheFile -Data ([ordered]@{
             hash = $hash
+            taskType = $prefixObj.type
             briefPath = $briefFile
             updatedAt = (Get-Timestamp)
         })
@@ -363,7 +413,9 @@ function Invoke-Init {
         Save-Metrics -Metrics (Get-Metrics)
     }
     Ensure-Directory $PromptCacheDir
-    Get-PromptPrefix | Out-Null
+    foreach ($tt in @("general", "bugfix", "refactor", "review")) {
+        Get-PromptPrefix -TaskType $tt | Out-Null
+    }
     Write-Host "[OK] runtime initialized at $RuntimeDir" -ForegroundColor Green
 }
 
@@ -409,6 +461,7 @@ function Invoke-NewTask {
         status = "ready"
         assignee = $Assignee
         reviewer = $Reviewer
+        taskType = (Resolve-TaskType -RawType $TaskType -Title $Title)
         requiredArtifacts = @(Parse-ListArg -Value $Artifacts)
         testCommand = $(if ([string]::IsNullOrWhiteSpace($TestCommand)) { $null } else { $TestCommand })
         maxAttempts = $(if ($MaxAttempts -lt 1) { 1 } else { $MaxAttempts })
@@ -948,7 +1001,7 @@ function Show-Help {
     Write-Host "Commands:"
     Write-Host "  init"
     Write-Host "  new-project -Name <name>"
-    Write-Host "  new-task -Project <project-id> -Title <title> [-Assignee ...] [-Reviewer ...] [-Artifacts a,b] [-TestCommand ...] [-MaxAttempts N]"
+    Write-Host "  new-task -Project <project-id> -Title <title> [-TaskType bugfix|refactor|review|general] [-Assignee ...] [-Reviewer ...] [-Artifacts a,b] [-TestCommand ...] [-MaxAttempts N]"
     Write-Host "  set-task -Project <project-id> -TaskId <id> [-Status ready|in_progress|in_review|done|blocked] [-Note ...]"
     Write-Host "  status"
     Write-Host "  next -Project <project-id>"
