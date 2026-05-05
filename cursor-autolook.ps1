@@ -35,6 +35,7 @@ $ReservedPortStart = 16121
 $ReservedPortEnd = 16160
 $KnownConflictStart = 15921
 $KnownConflictEnd = 15960
+$DefaultCacheHitRateThreshold = 30.0
 
 function Ensure-Directory {
     param([string]$Path)
@@ -342,6 +343,9 @@ function Invoke-CacheStats {
     if ($total -gt 0) {
         $ratio = [math]::Round((100.0 * [double]$cacheHit / [double]$total), 2)
         Write-Host ("  hitRate={0}%" -f $ratio)
+        $threshold = Get-CacheHitRateThreshold
+        Write-Host ("  threshold={0}%" -f $threshold)
+        Maybe-AlertLowCacheHitRate -HitRate $ratio -Total $total
     } else {
         Write-Host "  hitRate=N/A"
     }
@@ -365,6 +369,32 @@ function Send-Alert {
         } catch {
             Add-Content -Path $AlertsLogFile -Value ("[{0}] [WARN] webhook send failed: {1}" -f (Get-Timestamp), $_) -Encoding UTF8
         }
+    }
+}
+
+function Get-CacheHitRateThreshold {
+    $raw = $env:AUTOLOOK_CACHE_HITRATE_THRESHOLD
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        return $DefaultCacheHitRateThreshold
+    }
+    $value = 0.0
+    if ([double]::TryParse($raw, [ref]$value)) {
+        if ($value -lt 0) { return 0.0 }
+        if ($value -gt 100) { return 100.0 }
+        return $value
+    }
+    return $DefaultCacheHitRateThreshold
+}
+
+function Maybe-AlertLowCacheHitRate {
+    param(
+        [double]$HitRate,
+        [int]$Total
+    )
+    if ($Total -le 0) { return }
+    $threshold = Get-CacheHitRateThreshold
+    if ($HitRate -lt $threshold) {
+        Send-Alert -Level "WARN" -ProjectId "all" -TaskId "-" -Message ("Cache hit rate {0}% is below threshold {1}% (samples={2})" -f $HitRate, $threshold, $Total)
     }
 }
 
@@ -867,6 +897,13 @@ function Invoke-Metrics {
     Write-Host ("  created={0} dispatched={1} reviewed={2} done={3} requeued={4} blocked={5}" -f
         $created, $dispatched, $reviewed, $done, $requeued, $blocked)
     Write-Host ("  cacheHit={0} cacheMiss={1}" -f $cacheHit, $cacheMiss)
+    $cacheTotal = [int]$cacheHit + [int]$cacheMiss
+    if ($cacheTotal -gt 0) {
+        $cacheRatio = [math]::Round((100.0 * [double]$cacheHit / [double]$cacheTotal), 2)
+        $threshold = Get-CacheHitRateThreshold
+        Write-Host ("  cacheHitRate={0}% (threshold={1}%)" -f $cacheRatio, $threshold)
+        Maybe-AlertLowCacheHitRate -HitRate $cacheRatio -Total $cacheTotal
+    }
     Write-Host ("  updatedAt={0}" -f $m.updatedAt) -ForegroundColor DarkGray
     if ($Project) {
         if ($m.projects.PSObject.Properties.Name -contains $Project) {
@@ -898,6 +935,7 @@ function Invoke-Dashboard {
     $projectEscaped = $Project.Replace("'", "''")
 
     $topCmd = "cd '$rootEscaped'; Write-Host '=== Cursor Agent (主控/C位) ===' -ForegroundColor Cyan; if (Get-Command cursor -ErrorAction SilentlyContinue) { cursor agent } else { Write-Host 'cursor command not found, fallback to shell.' -ForegroundColor Yellow; powershell -NoExit }"
+    $opsCmd = "cd '$rootEscaped'; while (`$true) { Clear-Host; Write-Host '=== Ops Console ===' -ForegroundColor Cyan; Write-Host 'Project: $projectEscaped' -ForegroundColor DarkCyan; Write-Host ''; powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 status; Write-Host ''; powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 metrics -Project '$projectEscaped'; Write-Host ''; Write-Host 'Commands:' -ForegroundColor DarkCyan; Write-Host '  watchdog: powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 watchdog -Project $projectEscaped'; Write-Host '  cache:    powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 cache-stats'; Write-Host '  review:   powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 review -Project $projectEscaped -TaskId <id>'; Write-Host ''; if (Test-Path '.\runtime\alerts.log') { Write-Host 'Latest alerts:' -ForegroundColor Yellow; Get-Content '.\runtime\alerts.log' | Select-Object -Last 5 }; Start-Sleep -Seconds 8 }"
     $bottomLeftCmd = "cd '$rootEscaped'; Write-Host '=== OpenCode ===' -ForegroundColor Cyan; if (Get-Command opencode -ErrorAction SilentlyContinue) { opencode } else { Write-Host 'opencode command not found.' -ForegroundColor Yellow; powershell -NoExit }"
     $deepseekCmd = "cd '$rootEscaped'; Write-Host '=== DeepSeek-TUI ===' -ForegroundColor Cyan; if (Get-Command deepseek -ErrorAction SilentlyContinue) { deepseek } else { Write-Host 'deepseek command not found.' -ForegroundColor Yellow; powershell -NoExit }"
     $claudeCmds = @(
@@ -915,6 +953,7 @@ function Invoke-Dashboard {
     # Bottom-right: vertical queue (DeepSeek + dynamic Claude panes)
     $wtArgs = @(
         "-w", "0", "new-tab", "--title", "Main-Control", "powershell", "-NoExit", "-Command", $topCmd,
+        ";", "split-pane", "-H", "--size", "0.78", "--title", "Ops-Console", "powershell", "-NoExit", "-Command", $opsCmd,
         ";", "split-pane", "-V", "--size", "0.38", "--title", "OpenCode", "powershell", "-NoExit", "-Command", $bottomLeftCmd,
         ";", "focus-pane", "-t", "1",
         ";", "split-pane", "-H", "--size", "0.66", "--title", "DeepSeek-TUI", "powershell", "-NoExit", "-Command", $deepseekCmd

@@ -116,7 +116,7 @@ runtime/
 - `prep-brief`：按缓存策略生成任务 brief（尽量提高 token 缓存命中）。
 - `cache-stats`：查看缓存命中/未命中统计与命中率。
 - `set-project-prefix`：设置项目级长前缀（跨任务稳定复用上下文）。
-- `dashboard`：类似工作台布局（上方主控，左下 OpenCode，右侧纵向队列 DeepSeek + Claude）。默认自动计算 Claude 数量（按 `ready/in_progress/in_review` 任务数，范围 `1-6`）；也可用 `-ClaudeCount` 手动覆盖（`0-6`）。
+- `dashboard`：全交互工作台布局（Cursor 主控 + Ops 管理窗格 + OpenCode + DeepSeek + Claude 队列）。默认自动计算 Claude 数量（按 `ready/in_progress/in_review` 任务数，范围 `1-6`）；也可用 `-ClaudeCount` 手动覆盖（`0-6`）。
 - `metrics`：查看累计吞吐指标（创建/分派/审查/完成/返工/阻断）。
 - `check-ports`：检查当前端口规划是否与其它仓库冲突。
 - `quick-check`：一键快速健康检查（语法/端口/运行目录）。
@@ -129,6 +129,7 @@ runtime/
 - 已实现：提示词缓存（静态前缀 + 动态后缀哈希，记录 `cacheHit/cacheMiss`）。
 - 已实现：按任务类型的缓存模板版本化（`bugfix/refactor/review/general`）。
 - 已实现：项目级长前缀冻结（`project-prefix-v1.md`）。
+- 已实现：命中率阈值告警（默认 `<30%` 触发，可用 `AUTOLOOK_CACHE_HITRATE_THRESHOLD` 调整）。
 
 ## 端口规划
 
