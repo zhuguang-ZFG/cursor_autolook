@@ -6,6 +6,7 @@ param(
     [string]$Name,
     [string]$Project,
     [string]$Title,
+    [string]$UserRequest,
     [ValidateSet("ready", "in_progress", "in_review", "done", "blocked")]
     [string]$Status,
     [string]$TaskId,

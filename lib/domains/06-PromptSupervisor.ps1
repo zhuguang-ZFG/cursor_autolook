@@ -61,6 +61,11 @@ function Build-DynamicTaskSuffix {
     $artifacts = if ($TaskData.PSObject.Properties.Name -contains "requiredArtifacts") { @($TaskData.requiredArtifacts) } else { @() }
     $artifactsText = if ($artifacts.Count -gt 0) { $artifacts -join ", " } else { "(none)" }
     $testCmd = if ($TaskData.PSObject.Properties.Name -contains "testCommand" -and -not [string]::IsNullOrWhiteSpace([string]$TaskData.testCommand)) { [string]$TaskData.testCommand } else { "(none)" }
+    $ur = ""
+    if ($TaskData.PSObject.Properties.Name -contains "userRequest" -and -not [string]::IsNullOrWhiteSpace([string]$TaskData.userRequest)) {
+        $ur = [string]$TaskData.userRequest
+    }
+    $userReqText = if ([string]::IsNullOrWhiteSpace($ur)) { "(none)" } else { $ur }
 
     return @"
 Project: $ProjectId
@@ -69,6 +74,7 @@ Title: $($TaskData.title)
 Status: $($TaskData.status)
 Assignee: $($TaskData.assignee)
 Reviewer: $($TaskData.reviewer)
+UserRequest: $userReqText
 RequiredArtifacts: $artifactsText
 TestCommand: $testCmd
 RecentNotes: $noteText
@@ -98,6 +104,11 @@ function Build-DynamicTaskSuffixHash {
     $artifacts = if ($TaskData.PSObject.Properties.Name -contains "requiredArtifacts") { @($TaskData.requiredArtifacts) } else { @() }
     $artifactsText = if ($artifacts.Count -gt 0) { $artifacts -join ", " } else { "(none)" }
     $testCmd = if ($TaskData.PSObject.Properties.Name -contains "testCommand" -and -not [string]::IsNullOrWhiteSpace([string]$TaskData.testCommand)) { [string]$TaskData.testCommand } else { "(none)" }
+    $ur = ""
+    if ($TaskData.PSObject.Properties.Name -contains "userRequest" -and -not [string]::IsNullOrWhiteSpace([string]$TaskData.userRequest)) {
+        $ur = [string]$TaskData.userRequest
+    }
+    $userReqText = if ([string]::IsNullOrWhiteSpace($ur)) { "(none)" } else { $ur }
 
     $statusLine = ""
     if ($IncludeStatusInHash) {
@@ -111,6 +122,7 @@ Title: $($TaskData.title)
 $statusLine
 Assignee: $($TaskData.assignee)
 Reviewer: $($TaskData.reviewer)
+UserRequest: $userReqText
 RequiredArtifacts: $artifactsText
 TestCommand: $testCmd
 RecentNotes: $noteText

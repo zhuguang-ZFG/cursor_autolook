@@ -364,6 +364,7 @@ function Invoke-NewTask {
         maxAttempts = $(if ($MaxAttempts -lt 1) { 1 } else { $MaxAttempts })
         attemptCount = 0
         notes = @()
+        userRequest = $(if ([string]::IsNullOrWhiteSpace($UserRequest)) { $null } else { [string]$UserRequest.Trim() })
         dispatchEvidence = @()
         callbackEvidence = @()
         automation = [ordered]@{
