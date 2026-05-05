@@ -20,6 +20,9 @@ powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 schedule
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 schedule -Project my-project-id
 # 一键调度（回调环）：新窗口 automation-hub
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 schedule-hub [-Project …]
+# 登录后自动启动 schedule-hub（隐藏子进程；任务计划「当前用户登录时」触发）
+powershell -ExecutionPolicy Bypass -File .\scripts\Register-AutolookLogonTask.ps1 [-AutoLookRoot D:\path\to\cursor_autolook] [-Project 项目ID] [-DelaySeconds 45] [-VisibleWindow]
+powershell -ExecutionPolicy Bypass -File .\scripts\Register-AutolookLogonTask.ps1 -Unregister
 # 仅进工作流上下文（无调度窗口）
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 go [-Project …]
 # 别名：go-watch / go-hub 与 schedule / schedule-hub 等价

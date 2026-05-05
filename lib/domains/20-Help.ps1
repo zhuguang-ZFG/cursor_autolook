@@ -6,6 +6,8 @@ function Show-Help {
     Write-Host "一键进流程: .\cursor-autolook.ps1 go [-Project ID]          # 解析项目 + enter-workflow（脚本/Agent 友好）"
     Write-Host "一键调度:  .\cursor-autolook.ps1 schedule [-Project ID] [-Interval 30] [-ScheduleBackground]   # go + watchdog（-ScheduleBackground=隐藏后台）"
     Write-Host "            .\cursor-autolook.ps1 schedule-hub [-Project ID] [-ScheduleBackground]           # go + automation-hub"
+    Write-Host "开机自启:  .\scripts\Register-AutolookLogonTask.ps1 [-AutoLookRoot REPO] [-Project ID] [-DelaySeconds 45] [-VisibleWindow]"
+    Write-Host "            .\scripts\Register-AutolookLogonTask.ps1 -Unregister   # 移除计划任务"
     Write-Host "（等价别名 go-watch / go-hub）"
     Write-Host ""
     Write-Host "Commands:"
