@@ -6,7 +6,7 @@ function Invoke-AutomationHub {
     $cycle = 0
     Write-Host ""
     $hubCapText = if ([int]$HubMaxCycles -eq 0) { "until-idle" } else { [string]$HubMaxCycles }
-    Write-Host ("Automation hub — project={0} interval={1}s hubMaxCycles={2} consumeCallbacks={3} autoAdvanceGate={4} MaxConcurrentTasks={5} LocalModelMaxParallel={6}" -f `
+    Write-Host ("Automation hub - project={0} interval={1}s hubMaxCycles={2} consumeCallbacks={3} autoAdvanceGate={4} MaxConcurrentTasks={5} LocalModelMaxParallel={6}" -f `
             $Project, $Interval, $hubCapText, $consume, [bool]$HubAutoAdvanceGate, [int]$MaxConcurrentTasks, [int]$LocalModelMaxParallel) -ForegroundColor Cyan
 
     $savedMaxRounds = $MaxRounds
