@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>worker-queue</title>
+<style>
+body{font-family:system-ui,Segoe UI,sans-serif;margin:0;padding:16px;background:#0b0d10;color:#e8eaed;line-height:1.45}
+header{margin-bottom:16px}
+h1{font-size:1.1rem;font-weight:600;margin:0 0 4px 0}
+.sub{opacity:.72;font-size:.85rem}
+a{color:#8ab4f8}
+.pipeline{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:12px 0;padding:10px 12px;background:#161b22;border-radius:8px;font-size:.82rem}
+.pipe-box{padding:4px 10px;border-radius:4px;background:#21262d;border:1px solid #30363d}
+.pipe-arr{opacity:.55}
+#counts{margin:8px 0 12px;display:flex;flex-wrap:wrap;gap:8px;font-size:.82rem}
+.cnt{padding:4px 10px;border-radius:4px;background:#161b22;border:1px solid #30363d}
+.cnt .lab{opacity:.65;margin-right:6px}
+#cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px}
+.row1{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.badge{font-size:.72rem;padding:2px 8px;border-radius:4px;text-transform:uppercase;letter-spacing:.02em}
+.b-ready{background:#1c2d21;border:1px solid #238636}
+.b-run{background:#2a2d1c;border:1px solid #9e6a03}
+.b-rev{background:#1c242d;border:1px solid #388bfd}
+.b-done{background:#161b22;border:1px solid #484f58}
+.b-blk{background:#2d1c1c;border:1px solid #da3633}
+.tid{font-family:ui-monospace,monospace;font-size:.75rem;opacity:.75}
+.title{font-weight:600;margin:4px 0 6px 0}
+.meta,.next{font-size:.8rem;opacity:.85}
+.next{margin-top:8px}
+.next .hint{display:block;opacity:.65;margin-top:4px}
+.muted{opacity:.55}
+#foot{margin-top:14px;font-size:.75rem;opacity:.55}
+#raw{margin-top:16px}
+#raw summary{cursor:pointer;color:#8ab4f8;margin-bottom:6px}
+pre.rawbox{background:#161b22;padding:12px;border-radius:8px;overflow:auto;max-height:40vh;border:1px solid #30363d}
+</style></head>
+<body>
+<header><h1>cursor_autolook worker-queue</h1>
+<div class="sub">只读看板 · Project <code>@@ESC_PROJ@@</code> · <a href="/api/worker-queue.json">原始 JSON</a> · 每 4s 自动拉取</div></header>
+<div class="pipeline" aria-label="flow">
+<span class="pipe-box">automation-hub / watchdog</span><span class="pipe-arr">&#8594;</span>
+<span class="pipe-box">派发 in_progress + 租约</span><span class="pipe-arr">&#8594;</span>
+<span class="pipe-box">Worker（assignee）</span><span class="pipe-arr">&#8594;</span>
+<span class="pipe-box">submit-agent-callback</span><span class="pipe-arr">&#8594;</span>
+<span class="pipe-box">consume-callbacks</span><span class="pipe-arr">&#8594;</span>
+<span class="pipe-box">review / done</span>
+</div>
+<p class="sub">Workspace: <span id="ws">…</span></p>
+<div id="counts"></div>
+<div id="cards"></div>
+<p id="foot">feed: <span id="status">loading</span> · updatedAt <span id="ts"></span></p>
+<div id="raw"><details><summary>Technical JSON</summary><pre class="rawbox" id="out"></pre></details></div>
+<script>
+function el(id){return document.getElementById(id);}
+function esc(s){if(s==null)return '';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function badgeClass(st){var m={ready:'b-ready',in_progress:'b-run',in_review:'b-rev',done:'b-done',blocked:'b-blk'};return m[st]||'b-ready';}
+function render(d){
+ el('ws').textContent=d.workspace||'(none)';
+ el('ts').textContent=d.updatedAt||'';
+ var tasks=d.tasks||[];
+ var counts={};
+ for(var i=0;i<tasks.length;i++){var st=tasks[i].status;counts[st]=(counts[st]||0)+1;}
+ var order=['ready','in_progress','in_review','done','blocked'];
+ var hc='';
+ for(var j=0;j<order.length;j++){
+  var s=order[j],n=counts[s]||0;
+  hc+='<span class="cnt"><span class="lab">'+esc(s)+'</span>'+n+'</span>';
+ }
+ el('counts').innerHTML=hc||'<span class="muted">无任务</span>';
+ var cards='';
+ for(var k=0;k<tasks.length;k++){
+  var t=tasks[k];
+  var ns=t.nextStep||{};
+  var hints=ns.actionHints||[];
+  var hint=hints.length?hints[0]:'';
+  var primary=esc(ns.primaryNextAction||'');
+  cards+='<div class="card"><div class="row1"><span class="badge '+badgeClass(t.status)+'">'+esc(t.status)+'</span><span class="tid">'+esc(t.id)+'</span></div>';
+  cards+='<div class="title">'+esc(t.title)+'</div>';
+  cards+='<div class="meta">assignee '+esc(t.assignee)+' · reviewer '+esc(t.reviewer||'')+' · type '+esc(t.taskType||'')+'</div>';
+  if(t.workerModel) cards+='<div class="meta">model '+esc(t.workerModel)+'</div>';
+  cards+='<div class="next"><strong>next:</strong> '+primary+'<span class="hint">'+esc(hint)+'</span></div>';
+  if(t.callbackHint) cards+='<div class="next"><strong>callbackHint</strong> · <code style="font-size:.72rem;word-break:break-all">'+esc(t.callbackHint)+'</code></div>';
+  cards+='</div>';
+ }
+ el('cards').innerHTML=cards||'<p class="muted">快照中无任务。</p>';
+ el('out').textContent=JSON.stringify(d,null,2);
+}
+function tick(){
+ fetch('/api/worker-queue.json').then(function(r){return r.json();}).then(function(d){
+  render(d);el('status').textContent='ok';
+ }).catch(function(e){el('status').textContent=String(e);});
+}
+tick();setInterval(tick,4000);
+</script>
+</body></html>

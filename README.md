@@ -57,6 +57,27 @@ powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 review -Project m
 # 一键快速自检
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 quick-check
 
+# 环境体检（端口、语法、回调队列、CC Switch 路径、可选配置提示）
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 doctor
+
+# 仅列出待消费的回调文件（不执行 consume）
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 list-callbacks
+
+# 命令行实时跟读对齐事件（写入 runtime/interaction-feed.jsonl；另开终端 tail 即可）
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 follow-feed -Project my-project
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 follow-feed -Project my-project -FeedOnce -FeedTail 50
+
+# 弹出新 PowerShell 窗口看 feed（持续滚动；加 -FeedOnce 则回放后仍保留窗口）
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 follow-feed -Project my-project -FeedNewWindow
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 follow-feed -Project my-project -FeedNewWindow -FeedOnce -FeedTail 80
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 follow-feed -FeedTail 200
+
+# CC Switch DB 与路由配置对照（需本机已安装 python）
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 ccswitch-providers
+
+# 本机隔离端口启动 Codex app-server（WebSocket JSON-RPC，给外挂客户端 / 另一个终端当「打工仔」）
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 serve-codex
+
 # 一键端到端闭环验证
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 e2e-check
 
@@ -82,7 +103,15 @@ powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 set-task -Project
 ## 目录结构
 
 ```text
-cursor-autolook.ps1                    # 顶层入口（Cursor 中枢）
+cursor-autolook.ps1                    # 入口：参数、路径常量、命令分发；点源 lib/Autolook.Core.ps1
+lib/
+  Autolook.Core.ps1                    # 装载器：按文件名顺序 dot-source lib/domains/*.ps1
+  domains/                             # 按功能域拆分的实现脚本（文件名前缀序号即加载顺序）
+    01-Common.ps1                      # JSON/时间戳/度量、端口取值、Throttle 等底座
+    02-Feed.ps1 … 20-Help.ps1          # Feed、路由、Worker 队列、Watchdog、Hub、回调等
+  worker-queue-viewer.html             # serve-worker-queue GET / 看板静态页（占位符 @@ESC_PROJ@@）
+scripts/
+  split-autolook-core.ps1              #（可选）参数 -SourceFile 指向合并快照 .ps1，按脚本内映射重建 lib/domains
 multi-ai-routing-playbook.md           # 路由角色与提示词模板
 runtime/
   projects/
@@ -109,6 +138,7 @@ runtime/
 - `new-task`：创建任务。
 - `new-task`：支持任务契约（`-Artifacts`、`-TestCommand`、`-MaxAttempts`）。
 - `new-task`：支持任务类型模板（`-TaskType bugfix|refactor|review|general`，不传则自动识别）。
+- `new-task`：`-AutoAdvanceOnGatePass` — 与 **`automation-hub -HubAutoAdvanceGate`** 联动，通过验收门后可自动进入 `in_review`（见下文「多智能体自动化中枢」）。
 - `set-task`：更新任务状态和备注。
 - `status`：输出项目与任务总览。
 - `next`：挑选下一个可执行任务（`ready`）。
@@ -120,11 +150,79 @@ runtime/
 - `cache-stats`：查看缓存命中/未命中统计与命中率。
 - `set-project-prefix`：设置项目级长前缀（跨任务稳定复用上下文）。
 - `enter-workflow`：一键注入工作流上下文（项目状态、指标、任务 brief）。
-- `dashboard`：全交互工作台布局（Cursor 主控 + Ops 管理窗格 + OpenCode + DeepSeek + Claude 队列）。默认自动计算 Claude 数量（按 `ready/in_progress/in_review` 任务数，范围 `1-6`）；也可用 `-ClaudeCount` 手动覆盖（`0-6`）。
+- `dashboard`：Windows Terminal 多窗格工作台（Cursor 主控 + Ops / 回调 tick + OpenCode + DeepSeek + Claude 队列）；并自动再开一个 **「Codex-AppServer」标签页** 执行 **`serve-codex`**（默认 `ws://127.0.0.1:16128`），未安装 `codex` CLI 时该标签会提示并保持空壳。仍会按任务量自动计算 Claude 数（`1-6`），可用 `-ClaudeCount` 覆盖（`0-6`）。
 - `metrics`：查看累计吞吐指标（创建/分派/审查/完成/返工/阻断）。
 - `check-ports`：检查当前端口规划是否与其它仓库冲突。
+- `serve-codex`：在本机 **`127.0.0.1`** 启动 Codex **app-server**（默认 WebSocket 端口 **16128**，可 `-CodexServePort` 覆盖）。
 - `quick-check`：一键快速健康检查（语法/端口/运行目录）。
+- `doctor`：环境体检（语法、端口、`runtime` 目录、待处理回调数量、CC Switch 关键路径、Ollama 默认策略说明）。
+- `list-callbacks`：列出 `runtime/callbacks` 下待消费 JSON（不执行 `consume-callbacks`）。
+- `follow-feed`：在终端**持续**输出 `runtime/interaction-feed.jsonl`（新行格式化打印）。事件来源：`submit-agent-callback` 排队、watchdog **派发**、**consume-callbacks**、hub **门控推进**、自动 **review** 等。加 **`-FeedNewWindow`** 会 `Start-Process` **弹出新 PowerShell 窗口**（`-NoExit`）；**`-FeedOnce`** = 回放最近 `-FeedTail` 行后停在提示符不掉窗。
+- `ccswitch-providers`：运行 `scripts/audit_cc_switch_providers.py`，核对 DB 与 `cc-switch-router.config.json`。
 - `e2e-check`：一键端到端闭环验证（创建项目并跑完整状态流转）。
+- `automation-hub`：多智能体编排主循环（回调消费 + 可选门控推进 + 单轮 watchdog）。
+- `worker-queue`：导出 Sidecar 可用的任务队列 JSON（含 `nextStep` 指引与 `evidencePaths` 证据路径建议）。
+- `serve-worker-queue`：本机只读 HTTP 查看/拉取同一快照。
+- `kxnx-audit`：为 `D:\GIT\kxnx` 这类逆向工程仓库一键创建 8 个功能审查任务并自动跑完闭环。
+- 可选：将仓库根目录的 `autolook.config.example.json` 复制为 `runtime/autolook.config.json` 并编辑 `defaultOllamaModel`；在未传 `-OllamaModel` 时，`new-task` 对 assignee=Ollama 会使用该默认值。
+
+## 调度并发与本地模型
+
+- `watchdog` 支持 **`-MaxConcurrentTasks`**（默认 `1`）：大于 1 时允许多个任务同时处于 `in_progress`（便于云侧/多窗格并行）。
+- **`-LocalModelMaxParallel`**（默认 `1`）：对 **assignee 为 `Ollama`（本地）** 的任务做硬上限；超限则按 `fallbackAssignees` **自动改派**为非 Ollama；若无可用回退则本轮对该任务 **等待**（`[wait] Local model serialized`）。
+- **`stress-scheduler`**：生成一批 `general`（偏 Ollama）+ `bugfix`（DeepSeek）的合成任务，在短时间内循环 `watchdog`，并断言 **任意时刻最多 1 个 Ollama 在跑**，同时记录 `concurrentRunning` 峰值。默认跑完会删掉临时项目目录（可用 `-StressKeepProject` 保留排查）。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 stress-scheduler
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 stress-scheduler -StressTasks 16 -StressLocalHeavyTasks 8 -StressIterations 600
+```
+
+## Codex 作为隔离端口的「打工仔」
+
+OpenAI **Codex CLI** 支持 `codex app-server --listen ws://127.0.0.1:端口`（JSON-RPC over WebSocket，上游标注为实验能力）。本仓库已对齐 **`16121–16160`** 段，默认 **Codex 占 `16128`**（`runtime/ports.json` → `defaults.codex`）。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 serve-codex
+# 覆盖端口
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 serve-codex -CodexServePort 18090
+```
+
+- 另开终端可 **`codex --remote ws://127.0.0.1:16128`** 挂上同一进程（以你本机 Codex 版本文档为准）。
+- 需要 WS 鉴权时，设置环境变量 **`AUTOLOOK_CODEX_WS_TOKEN_FILE`** 指向 token 文件，将自动附加 `--ws-auth capability-token --ws-token-file ...`。
+- **说明**：`cursor_autolook` 只负责 **固定端口 + 拉起进程**；任务状态机仍通过 **`automation-hub` / `worker-queue` / `submit-agent-callback`** 等与中枢同步。批量/CI 场景官方更推荐 **Codex SDK**，与「长期挂一个 app-server」场景不同。
+
+## 多智能体自动化中枢（automation-hub）
+
+把 **`consume-callbacks`（外挂智能体收口）**、可选 **验收门驱动的自动推进**、以及 **单轮 `watchdog`（调度+自动审查）** 串在一个循环里，适合做「人机混合」的长期值守进程。
+
+- **`automation-hub`**：默认每轮执行 `consume-callbacks` →（可选）`HubAutoAdvanceGate` → **`watchdog -MaxRounds 1`**。无活跃任务时自动退出。
+  - **`-HubMaxCycles N`**：`N=0`（默认）表示一直跑到队列闲置；`N>0` 表示最多跑 N 轮（便于冒烟 / CI）。
+  - **`-SkipHubConsumeCallbacks`**：跳过回调消费（只做调度与审查）。
+  - **`-HubAutoAdvanceGate`**：对已派工任务，若 JSON 里 `automation.autoAdvanceOnGatePass=true`，且 **`Invoke-AcceptanceGate`（产物 + `TestCommand`）通过**，则中枢自动 `in_progress` → `in_review`，下一轮子由 `watchdog` 自动审查收口 **`done`**。  
+    - **务必谨慎**：只对「可由测试/产物客观判定」的任务打开；新建任务可加 **`-AutoAdvanceOnGatePass`**。
+  - 与其它参数组合：可提高 **`-MaxConcurrentTasks`** 以并行调度云侧执行体，同时用 **`-LocalModelMaxParallel 1`** 将 **Ollama** 固定在单路并行。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 automation-hub -Project MYPROJ -Interval 15 -HubAutoAdvanceGate -MaxConcurrentTasks 4 -LocalModelMaxParallel 1
+
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 automation-hub -Project MYPROJ -SkipHubConsumeCallbacks -HubMaxCycles 120
+```
+
+- **`worker-queue`**：导出 **`runtime/worker-queue/<PROJECT>.json`**。除 `briefPath`、`autoAdvanceOnGatePass`、`callbackHint` 外，每条任务带 **`nextStep`**：
+  - **`primaryNextAction`**：机器可读阶段（如 `wait_dispatch`、`execute_then_callback`、`execute_then_gate_automation_or_callback`、`wait_auto_review`）。
+  - **`actionHints`** / **`automationChannels`** / **`suggestedSequence`**：给人看的说明、可走的中枢通道、推荐顺序（含示例命令行）。
+  - **`evidencePaths`**：按 `taskType` 与标题规则生成的建议证据目录/文件，帮助审查任务快速聚焦代码位置。
+- **`serve-worker-queue`**：在本机 **`127.0.0.1`** 起 **只读** HTTP（无额外依赖），每次请求即时生成与 `worker-queue` 相同结构的 JSON。
+  - 默认端口取 **`runtime/ports.json` → `defaults.workerQueue`（16127）**；可用 **`-WorkerQueueServePort`** 覆盖。
+  - **`GET /`**：可视化看板（状态计数、派发流水线说明、任务卡片含 `nextStep`/`callbackHint`，约 4s 自动刷新；底部可展开原始 JSON）；**`GET /api/worker-queue.json`**：JSON。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 worker-queue -Project MYPROJ -WorkerQueuePrepBrief
+
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 serve-worker-queue -Project MYPROJ
+
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 serve-worker-queue -Project MYPROJ -WorkerQueueServePort 18080 -WorkerQueuePrepBrief
+```
 
 ## 无人化能力现状
 
@@ -134,6 +232,7 @@ runtime/
 - 已实现：按任务类型的缓存模板版本化（`bugfix/refactor/review/general`）。
 - 已实现：项目级长前缀冻结（`project-prefix-v1.md`）。
 - 已实现：命中率阈值告警（默认 `<30%` 触发，可用 `AUTOLOOK_CACHE_HITRATE_THRESHOLD` 调整）。
+- 已实现：`ops-report` 自动写入 `runtime/reports/ops-report-<project>-<timestamp>.md` 便于归档。
 
 ## 端口规划
 
@@ -144,6 +243,10 @@ runtime/
   - api: `16122`
   - dashboard: `16123`
   - reviewer: `16124`
+  - opencode: `16125`
+  - deepseek: `16126`
+  - worker-queue HTTP（`serve-worker-queue`）: `16127`
+  - Codex app-server WebSocket（`serve-codex`）: `16128`
 
 ## 仓库地址
 
