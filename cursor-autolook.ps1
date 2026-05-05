@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("help", "init", "new-project", "new-task", "set-task", "status", "next", "check-ports", "reconcile", "watchdog", "review", "dashboard", "quick-check", "e2e-check", "metrics", "prep-brief", "cache-stats", "set-project-prefix", "enter-workflow")]
+    [ValidateSet("help", "init", "new-project", "new-task", "set-task", "status", "next", "check-ports", "reconcile", "watchdog", "review", "dashboard", "quick-check", "e2e-check", "metrics", "prep-brief", "cache-stats", "set-project-prefix", "enter-workflow", "serve-deepseek", "serve-opencode", "current-workflow", "agent-done", "close-open", "consume-callbacks", "watch-callbacks", "dashboard-layout", "set-dashboard-layout", "evolve-dashboard-layout", "evolve-supervisor", "supervisor-evolution", "evolve-routing", "evolve-reliability")]
     [string]$Command = "help",
 
     [string]$Name,
@@ -20,7 +20,17 @@ param(
     [int]$MaxRounds = 0,
     [int]$LeaseMinutes = 45,
     [int]$ClaudeCount = -1,
-    [int]$MaxAttempts = 3
+    [int]$MaxAttempts = 3,
+    [switch]$AllowInsecure,
+    [switch]$NoAutoRoute,
+    [switch]$ApproveExpensive,
+    [switch]$AutoContinue,
+    [switch]$SkipLayoutEvolve,
+    [switch]$LayoutAutoEvolve,
+    [double]$DashboardMainOpsSplit = -1,
+    [double]$DashboardOpenCodeSplit = -1,
+    [double]$DashboardDeepseekSplit = -1,
+    [double]$DashboardClaudeStackSplit = -1
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,6 +41,12 @@ $PortsFile = Join-Path $RuntimeDir "ports.json"
 $MetricsFile = Join-Path $RuntimeDir "metrics.json"
 $AlertsLogFile = Join-Path $RuntimeDir "alerts.log"
 $PromptCacheDir = Join-Path $RuntimeDir "prompt-cache"
+$CurrentWorkflowFile = Join-Path $RuntimeDir "current-workflow.json"
+$RoutingFile = Join-Path $RuntimeDir "routing.json"
+$CallbacksDir = Join-Path $RuntimeDir "callbacks"
+$CallbacksProcessedDir = Join-Path $CallbacksDir "processed"
+$DashboardLayoutFile = Join-Path $RuntimeDir "dashboard-layout.json"
+$SupervisorEvolutionFile = Join-Path $RuntimeDir "supervisor-evolution.json"
 $ReservedPortStart = 16121
 $ReservedPortEnd = 16160
 $KnownConflictStart = 15921
@@ -46,6 +62,108 @@ function Ensure-Directory {
 
 function Get-Timestamp {
     return (Get-Date).ToString("yyyy-MM-ddTHH:mm:ssK")
+}
+
+function Parse-DateOrNull {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    try {
+        return [datetime]::Parse($Value)
+    } catch {
+        return $null
+    }
+}
+
+function Get-PortValue {
+    param(
+        [object]$Ports,
+        [string]$Name,
+        [int]$Fallback
+    )
+    if ($Ports -and $Ports.PSObject.Properties.Name -contains "defaults") {
+        $defs = $Ports.defaults
+        if ($defs -and $defs.PSObject.Properties.Name -contains $Name) {
+            return [int]$defs.$Name
+        }
+    }
+    return $Fallback
+}
+
+function New-EncodedCommand {
+    param([string]$ScriptText)
+    $bytes = [System.Text.Encoding]::Unicode.GetBytes($ScriptText)
+    return [Convert]::ToBase64String($bytes)
+}
+
+function Set-CurrentWorkflow {
+    param(
+        [string]$ProjectId,
+        [string]$Source = "manual"
+    )
+    if ([string]::IsNullOrWhiteSpace($ProjectId)) { return }
+    Ensure-Directory $RuntimeDir
+    $data = [ordered]@{
+        projectId = $ProjectId
+        source = $Source
+        updatedAt = (Get-Timestamp)
+    }
+    Write-JsonFile -Path $CurrentWorkflowFile -Data $data
+}
+
+function Get-CurrentWorkflow {
+    if (-not (Test-Path $CurrentWorkflowFile)) { return $null }
+    return (Read-JsonFile -Path $CurrentWorkflowFile)
+}
+
+function Get-RoutingConfig {
+    Invoke-Init
+    if (-not (Test-Path $RoutingFile)) {
+        return $null
+    }
+    return (Read-JsonFile -Path $RoutingFile)
+}
+
+function Resolve-TaskRouting {
+    param([string]$ResolvedTaskType)
+    $cfg = Get-RoutingConfig
+    if (-not $cfg) { return $null }
+    if (-not ($cfg.PSObject.Properties.Name -contains "byTaskType")) { return $null }
+    $map = $cfg.byTaskType
+    $tt = if ([string]::IsNullOrWhiteSpace($ResolvedTaskType)) { "general" } else { $ResolvedTaskType }
+    if ($map.PSObject.Properties.Name -contains $tt) {
+        return $map.$tt
+    }
+    if ($map.PSObject.Properties.Name -contains "general") {
+        return $map.general
+    }
+    return $null
+}
+
+function Contains-ApiNebula {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
+    return ($Text.ToLowerInvariant() -match "apinebula")
+}
+
+function Assert-ApiNebulaEscalationAllowed {
+    param(
+        [string]$ProjectId,
+        [bool]$FallbackOnlyWhenAllFailed
+    )
+    if (-not $FallbackOnlyWhenAllFailed) { return }
+    $tasks = @(Get-Tasks -ProjectId $ProjectId)
+    $nonNebula = @($tasks | Where-Object { -not (Contains-ApiNebula -Text ([string]$_.assignee)) })
+    if ($nonNebula.Count -eq 0) {
+        throw "apinebula escalation denied: no prior non-apinebula attempts found in this project."
+    }
+    $activeNonNebula = @($nonNebula | Where-Object { $_.status -in @("ready", "in_progress", "in_review") })
+    if ($activeNonNebula.Count -gt 0) {
+        throw "apinebula escalation denied: non-apinebula tasks are still runnable/in-progress. Exhaust lower-cost models first."
+    }
+    $notBlocked = @($nonNebula | Where-Object { $_.status -ne "blocked" })
+    if ($notBlocked.Count -gt 0) {
+        throw "apinebula escalation denied: not all non-apinebula tasks are blocked."
+    }
 }
 
 function Parse-ListArg {
@@ -249,6 +367,111 @@ RecentNotes: $noteText
 "@
 }
 
+function Get-SupervisorEvolutionConfig {
+    Invoke-Init
+    if (-not (Test-Path $SupervisorEvolutionFile)) { return $null }
+    return (Read-JsonFile -Path $SupervisorEvolutionFile)
+}
+
+function Build-DynamicTaskSuffixHash {
+    param(
+        [string]$ProjectId,
+        [object]$TaskData,
+        [bool]$IncludeStatusInHash,
+        [int]$RecentNotesCountInHash
+    )
+
+    $notes = @()
+    if ($TaskData.PSObject.Properties.Name -contains "notes") {
+        $notes = @($TaskData.notes | Select-Object -Last $RecentNotesCountInHash | ForEach-Object { [string]$_.text })
+    }
+    $noteText = if ($notes.Count -gt 0) { $notes -join " | " } else { "(none)" }
+
+    $artifacts = if ($TaskData.PSObject.Properties.Name -contains "requiredArtifacts") { @($TaskData.requiredArtifacts) } else { @() }
+    $artifactsText = if ($artifacts.Count -gt 0) { $artifacts -join ", " } else { "(none)" }
+    $testCmd = if ($TaskData.PSObject.Properties.Name -contains "testCommand" -and -not [string]::IsNullOrWhiteSpace([string]$TaskData.testCommand)) { [string]$TaskData.testCommand } else { "(none)" }
+
+    $statusLine = ""
+    if ($IncludeStatusInHash) {
+        $statusLine = "Status: $($TaskData.status)`n"
+    }
+
+    return @"
+Project: $ProjectId
+TaskId: $($TaskData.id)
+Title: $($TaskData.title)
+$statusLine
+Assignee: $($TaskData.assignee)
+Reviewer: $($TaskData.reviewer)
+RequiredArtifacts: $artifactsText
+TestCommand: $testCmd
+RecentNotes: $noteText
+"@
+}
+
+function Invoke-EvolveSupervisor {
+    Invoke-Init
+    $evo = Get-SupervisorEvolutionConfig
+    if (-not $evo) { throw "Missing supervisor evolution config." }
+
+    $m = Get-Metrics
+    $cacheHit = Get-MetricValue -Obj $m.totals -Name "cacheHit"
+    $cacheMiss = Get-MetricValue -Obj $m.totals -Name "cacheMiss"
+    $total = [int]$cacheHit + [int]$cacheMiss
+
+    if ($total -lt [int]$evo.minCacheSamples) {
+        Write-Host ("[SKIP] not enough cache samples: samples={0}, min={1}" -f $total, $evo.minCacheSamples) -ForegroundColor Yellow
+        return
+    }
+
+    $hitRate = [math]::Round((100.0 * [double]$cacheHit / [double]$total), 2)
+    $threshold = $evo.cacheHitRateThreshold
+
+    Write-Host ("[Evolve] cacheHitRate={0}% (threshold={1}%), samples={2}" -f $hitRate, $threshold, $total) -ForegroundColor Cyan
+
+    if ($hitRate -ge [double]$threshold) {
+        Write-Host "[Evolve] cache hit rate is OK. No evolution applied." -ForegroundColor Green
+        return
+    }
+
+    if ([int]$evo.stepApplied -ge [int]$evo.maxSteps) {
+        Write-Host ("[Evolve] max steps reached: stepApplied={0}" -f $evo.stepApplied) -ForegroundColor Yellow
+        return
+    }
+
+    $nextStep = [int]$evo.stepApplied
+    $newHistory = @([string]::Format("[{0}] cacheHitRate={1}% hit< {2}% -> evolve step {3}", (Get-Timestamp), $hitRate, $threshold, $nextStep))
+    $evo.history = @($evo.history + $newHistory)
+
+    # Bounded evolution strategy:
+    # step 0: reduce cache key sensitivity to status changes
+    # step 1: reduce cache key sensitivity to notes (use only latest 1 note)
+    # step 2: stop including notes (RecentNotesCount=0) in cache key
+    switch ($nextStep) {
+        0 {
+            $evo.includeStatusInHash = $false
+            break
+        }
+        1 {
+            $evo.recentNotesCountInHash = 1
+            break
+        }
+        2 {
+            $evo.recentNotesCountInHash = 0
+            break
+        }
+        default {
+            Write-Host ("[Evolve] no rule for step {0}" -f $nextStep) -ForegroundColor Yellow
+            return
+        }
+    }
+
+    $evo.stepApplied = [int]$evo.stepApplied + 1
+    $evo.updatedAt = (Get-Timestamp)
+    Write-JsonFile -Path $SupervisorEvolutionFile -Data $evo
+    Write-Host ("[OK] supervisor evolution applied: stepApplied={0}" -f $evo.stepApplied) -ForegroundColor Green
+}
+
 function Get-TaskCacheFile {
     param(
         [string]$ProjectId,
@@ -292,6 +515,7 @@ function Invoke-SetProjectPrefix {
 function Invoke-EnterWorkflow {
     if ([string]::IsNullOrWhiteSpace($Project)) { throw "Please provide -Project" }
     $p = Require-Project -ProjectId $Project
+    Set-CurrentWorkflow -ProjectId $Project -Source "enter-workflow"
     $proj = Read-JsonFile -Path $p.File
     $workspace = if ($proj.PSObject.Properties.Name -contains "workspace") { [string]$proj.workspace } else { $Root }
 
@@ -348,8 +572,12 @@ function Invoke-PrepBrief {
     $taskType = if ($task.PSObject.Properties.Name -contains "taskType") { [string]$task.taskType } else { "general" }
     $prefixObj = Get-PromptPrefix -TaskType $taskType
     $projectPrefix = Get-ProjectPrefixText -ProjectId $Project
-    $dynamic = Build-DynamicTaskSuffix -ProjectId $Project -TaskData $task
-    $keySource = ($dynamic + "`n" + $prefixObj.text + "`n" + $projectPrefix)
+    $dynamicPrompt = Build-DynamicTaskSuffix -ProjectId $Project -TaskData $task
+    $evo = Get-SupervisorEvolutionConfig
+    $includeStatusInHash = [bool]$evo.includeStatusInHash
+    $recentNotesCountInHash = [int]$evo.recentNotesCountInHash
+    $dynamicHash = Build-DynamicTaskSuffixHash -ProjectId $Project -TaskData $task -IncludeStatusInHash $includeStatusInHash -RecentNotesCountInHash $recentNotesCountInHash
+    $keySource = ($dynamicHash + "`n" + $prefixObj.text + "`n" + $projectPrefix)
     $hash = (Get-FileHash -InputStream ([System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($keySource))) -Algorithm SHA256).Hash
     $cacheFile = Get-TaskCacheFile -ProjectId $Project -TaskId $TaskId
     $briefFile = Join-Path (Split-Path -Parent $cacheFile) "$TaskId.brief.md"
@@ -366,7 +594,7 @@ function Invoke-PrepBrief {
         Add-MetricEvent -ProjectId $Project -EventType "cacheHit"
         Write-Host "[CACHE HIT] brief unchanged: $briefFile" -ForegroundColor Green
     } else {
-        $brief = $projectPrefix + "`n`n---`n`n" + $prefixObj.text + "`n`n---`n`n" + $dynamic
+        $brief = $projectPrefix + "`n`n---`n`n" + $prefixObj.text + "`n`n---`n`n" + $dynamicPrompt
         Set-Content -Path $briefFile -Value $brief -Encoding UTF8
         Write-JsonFile -Path $cacheFile -Data ([ordered]@{
             hash = $hash
@@ -514,16 +742,134 @@ function Invoke-Init {
                 api = ($ReservedPortStart + 1)
                 dashboard = ($ReservedPortStart + 2)
                 reviewer = ($ReservedPortStart + 3)
+                opencode = ($ReservedPortStart + 4)
+                deepseek = ($ReservedPortStart + 5)
             }
             createdAt = (Get-Timestamp)
             updatedAt = (Get-Timestamp)
         }
         Write-JsonFile -Path $PortsFile -Data $ports
+    } else {
+        $ports = Read-JsonFile -Path $PortsFile
+        $changed = $false
+        if (-not ($ports.PSObject.Properties.Name -contains "defaults")) {
+            $ports | Add-Member -NotePropertyName defaults -NotePropertyValue ([ordered]@{}) -Force
+            $changed = $true
+        }
+        if (-not ($ports.defaults.PSObject.Properties.Name -contains "opencode")) {
+            $ports.defaults | Add-Member -NotePropertyName opencode -NotePropertyValue ($ReservedPortStart + 4) -Force
+            $changed = $true
+        }
+        if (-not ($ports.defaults.PSObject.Properties.Name -contains "deepseek")) {
+            $ports.defaults | Add-Member -NotePropertyName deepseek -NotePropertyValue ($ReservedPortStart + 5) -Force
+            $changed = $true
+        }
+        if ($changed) {
+            $ports.updatedAt = (Get-Timestamp)
+            Write-JsonFile -Path $PortsFile -Data $ports
+        }
     }
     if (-not (Test-Path $MetricsFile)) {
         Save-Metrics -Metrics (Get-Metrics)
     }
+    if (-not (Test-Path $RoutingFile)) {
+        $routing = [ordered]@{
+            version = 1
+            strategy = "small-model-first-large-model-gate"
+            expensiveProviderPolicy = [ordered]@{
+                apinebula = [ordered]@{
+                    enabled = $false
+                    requireUserApproval = $true
+                    fallbackOnlyWhenAllFailed = $true
+                    note = "High token cost. Default disabled."
+                }
+            }
+            byTaskType = [ordered]@{
+                bugfix = [ordered]@{
+                    assignee = "DeepSeek"
+                    reviewer = "GitHub gpt-5-mini"
+                    modelTier = "mid"
+                    tokenPolicy = "strict"
+                }
+                refactor = [ordered]@{
+                    assignee = "OpenCode"
+                    reviewer = "GitHub gpt-5-mini"
+                    modelTier = "small"
+                    tokenPolicy = "strict"
+                }
+                review = [ordered]@{
+                    assignee = "Claude"
+                    reviewer = "GitHub gpt-5-mini"
+                    modelTier = "large"
+                    tokenPolicy = "quality-first"
+                }
+                general = [ordered]@{
+                    assignee = "Cursor"
+                    reviewer = "GitHub gpt-5-mini"
+                    modelTier = "small"
+                    tokenPolicy = "strict"
+                }
+            }
+            updatedAt = (Get-Timestamp)
+        }
+        Write-JsonFile -Path $RoutingFile -Data $routing
+    } else {
+        $routing = Read-JsonFile -Path $RoutingFile
+        $changed = $false
+        if (-not ($routing.PSObject.Properties.Name -contains "expensiveProviderPolicy") -or -not $routing.expensiveProviderPolicy) {
+            $routing | Add-Member -NotePropertyName expensiveProviderPolicy -NotePropertyValue ([pscustomobject]@{}) -Force
+            $changed = $true
+        }
+        if (-not ($routing.expensiveProviderPolicy.PSObject.Properties.Name -contains "apinebula")) {
+            $routing.expensiveProviderPolicy | Add-Member -NotePropertyName apinebula -NotePropertyValue ([pscustomobject]@{
+                enabled = $false
+                requireUserApproval = $true
+                fallbackOnlyWhenAllFailed = $true
+                note = "High token cost. Default disabled."
+            }) -Force
+            $changed = $true
+        } else {
+            $ap = $routing.expensiveProviderPolicy.apinebula
+            if (-not ($ap.PSObject.Properties.Name -contains "fallbackOnlyWhenAllFailed")) {
+                $ap | Add-Member -NotePropertyName fallbackOnlyWhenAllFailed -NotePropertyValue $true -Force
+                $changed = $true
+            }
+        }
+        if ($changed) {
+            $routing.updatedAt = (Get-Timestamp)
+            Write-JsonFile -Path $RoutingFile -Data $routing
+        }
+    }
     Ensure-Directory $PromptCacheDir
+    Ensure-Directory $CallbacksDir
+    Ensure-Directory $CallbacksProcessedDir
+    if (-not (Test-Path $DashboardLayoutFile)) {
+        $layout = [ordered]@{
+            version = 1
+            mainOpsSplit = 0.78
+            openCodeSplit = 0.38
+            deepseekSplit = 0.66
+            claudeStackSplit = 0.66
+            lastProject = $null
+            updatedAt = (Get-Timestamp)
+        }
+        Write-JsonFile -Path $DashboardLayoutFile -Data $layout
+    }
+
+    if (-not (Test-Path $SupervisorEvolutionFile)) {
+        $evo = [ordered]@{
+            version = 1
+            stepApplied = 0
+            maxSteps = 3
+            minCacheSamples = 12
+            cacheHitRateThreshold = $DefaultCacheHitRateThreshold
+            includeStatusInHash = $true
+            recentNotesCountInHash = 3
+            updatedAt = (Get-Timestamp)
+            history = @()
+        }
+        Write-JsonFile -Path $SupervisorEvolutionFile -Data $evo
+    }
     foreach ($tt in @("general", "bugfix", "refactor", "review")) {
         Get-PromptPrefix -TaskType $tt | Out-Null
     }
@@ -568,14 +914,67 @@ function Invoke-NewTask {
     $tasksDir = Join-Path $p.Dir "tasks"
     Ensure-Directory $tasksDir
 
+    $resolvedTaskType = (Resolve-TaskType -RawType $TaskType -Title $Title)
+    $finalAssignee = $Assignee
+    $finalReviewer = $Reviewer
+    $modelTier = "unset"
+    $tokenPolicy = "unset"
+    $routeSource = "manual"
+    if (-not $NoAutoRoute) {
+        $route = Resolve-TaskRouting -ResolvedTaskType $resolvedTaskType
+        if ($route) {
+            # Keep explicit CLI overrides; only auto-fill defaults.
+            if ([string]$finalAssignee -eq "DeepSeek" -and $route.PSObject.Properties.Name -contains "assignee") {
+                $finalAssignee = [string]$route.assignee
+            }
+            if ([string]$finalReviewer -eq "GitHub gpt-5-mini" -and $route.PSObject.Properties.Name -contains "reviewer") {
+                $finalReviewer = [string]$route.reviewer
+            }
+            if ($route.PSObject.Properties.Name -contains "modelTier") {
+                $modelTier = [string]$route.modelTier
+            }
+            if ($route.PSObject.Properties.Name -contains "tokenPolicy") {
+                $tokenPolicy = [string]$route.tokenPolicy
+            }
+            $routeSource = "routing.json"
+        }
+    }
+
+    $routingCfg = Get-RoutingConfig
+    $usesApiNebula = (Contains-ApiNebula -Text $finalAssignee) -or (Contains-ApiNebula -Text $finalReviewer)
+    if ($usesApiNebula) {
+        $policyEnabled = $false
+        $policyRequireApproval = $true
+        $policyFallbackOnlyWhenAllFailed = $true
+        if ($routingCfg -and $routingCfg.PSObject.Properties.Name -contains "expensiveProviderPolicy") {
+            $pp = $routingCfg.expensiveProviderPolicy
+            if ($pp.PSObject.Properties.Name -contains "apinebula") {
+                $ap = $pp.apinebula
+                if ($ap.PSObject.Properties.Name -contains "enabled") { $policyEnabled = [bool]$ap.enabled }
+                if ($ap.PSObject.Properties.Name -contains "requireUserApproval") { $policyRequireApproval = [bool]$ap.requireUserApproval }
+                if ($ap.PSObject.Properties.Name -contains "fallbackOnlyWhenAllFailed") { $policyFallbackOnlyWhenAllFailed = [bool]$ap.fallbackOnlyWhenAllFailed }
+            }
+        }
+        if (-not $policyEnabled) {
+            throw "apinebula is disabled by routing policy (runtime/routing.json). Enable it explicitly and require user approval before use."
+        }
+        if ($policyRequireApproval -and -not $ApproveExpensive) {
+            throw "apinebula requires explicit user approval. Re-run with -ApproveExpensive only after user confirmation."
+        }
+        Assert-ApiNebulaEscalationAllowed -ProjectId $Project -FallbackOnlyWhenAllFailed $policyFallbackOnlyWhenAllFailed
+    }
+
     $taskId = ([guid]::NewGuid().ToString("N")).Substring(0, 12)
     $task = [ordered]@{
         id = $taskId
         title = $Title
         status = "ready"
-        assignee = $Assignee
-        reviewer = $Reviewer
-        taskType = (Resolve-TaskType -RawType $TaskType -Title $Title)
+        assignee = $finalAssignee
+        reviewer = $finalReviewer
+        taskType = $resolvedTaskType
+        modelTier = $modelTier
+        tokenPolicy = $tokenPolicy
+        routeSource = $routeSource
         requiredArtifacts = @(Parse-ListArg -Value $Artifacts)
         testCommand = $(if ([string]::IsNullOrWhiteSpace($TestCommand)) { $null } else { $TestCommand })
         maxAttempts = $(if ($MaxAttempts -lt 1) { 1 } else { $MaxAttempts })
@@ -589,7 +988,7 @@ function Invoke-NewTask {
     Add-MetricEvent -ProjectId $Project -EventType "created"
     $script:TaskId = $taskId
     Invoke-PrepBrief
-    Write-Host "[OK] task created: $taskId ($Title)" -ForegroundColor Green
+    Write-Host ("[OK] task created: {0} ({1}) assignee={2} reviewer={3} tier={4}" -f $taskId, $Title, $finalAssignee, $finalReviewer, $modelTier) -ForegroundColor Green
 }
 
 function Invoke-SetTask {
@@ -643,10 +1042,21 @@ function Invoke-Status {
         $ports = Read-JsonFile -Path $PortsFile
         Write-Host ("  - reserved: {0}-{1}" -f $ports.reservedRange.start, $ports.reservedRange.end)
         Write-Host ("  - avoid:    {0}-{1}" -f $ports.knownConflictRange.start, $ports.knownConflictRange.end)
-        Write-Host ("  - hub/api/dashboard/reviewer: {0}/{1}/{2}/{3}" -f $ports.defaults.hub, $ports.defaults.api, $ports.defaults.dashboard, $ports.defaults.reviewer)
+        $hubPort = Get-PortValue -Ports $ports -Name "hub" -Fallback $ReservedPortStart
+        $apiPort = Get-PortValue -Ports $ports -Name "api" -Fallback ($ReservedPortStart + 1)
+        $dashboardPort = Get-PortValue -Ports $ports -Name "dashboard" -Fallback ($ReservedPortStart + 2)
+        $reviewerPort = Get-PortValue -Ports $ports -Name "reviewer" -Fallback ($ReservedPortStart + 3)
+        $opencodePort = Get-PortValue -Ports $ports -Name "opencode" -Fallback ($ReservedPortStart + 4)
+        $deepseekPort = Get-PortValue -Ports $ports -Name "deepseek" -Fallback ($ReservedPortStart + 5)
+        Write-Host ("  - hub/api/dashboard/reviewer: {0}/{1}/{2}/{3}" -f $hubPort, $apiPort, $dashboardPort, $reviewerPort)
+        Write-Host ("  - opencode/deepseek: {0}/{1}" -f $opencodePort, $deepseekPort)
     } else {
         Write-Host ("  - reserved: {0}-{1}" -f $ReservedPortStart, $ReservedPortEnd)
         Write-Host ("  - avoid:    {0}-{1}" -f $KnownConflictStart, $KnownConflictEnd)
+    }
+    $currentWorkflow = Get-CurrentWorkflow
+    if ($currentWorkflow -and $currentWorkflow.PSObject.Properties.Name -contains "projectId") {
+        Write-Host ("Current Workflow: {0} (source={1})" -f $currentWorkflow.projectId, $currentWorkflow.source) -ForegroundColor DarkCyan
     }
 
     $projectDirs = Get-ChildItem -Path $ProjectsDir -Directory -ErrorAction SilentlyContinue
@@ -725,11 +1135,14 @@ function Invoke-Reconcile {
         if ($t.status -ne "in_progress") { continue }
         if (-not ($t.PSObject.Properties.Name -contains "leaseUntil")) { continue }
         if (-not $t.leaseUntil) { continue }
-        $lease = $null
-        if ([datetime]::TryParse([string]$t.leaseUntil, [ref]$lease) -and $lease -lt $now) {
+        $lease = Parse-DateOrNull -Value ([string]$t.leaseUntil)
+        if ($lease -and $lease -lt $now) {
             $file = Get-TaskFilePath -ProjectId $Project -TaskId $t.id
             $task = Read-JsonFile -Path $file
             $task.status = "ready"
+            if (-not ($task.PSObject.Properties.Name -contains "leaseUntil")) {
+                $task | Add-Member -NotePropertyName leaseUntil -NotePropertyValue $null -Force
+            }
             $task.leaseUntil = $null
             if (-not ($task.PSObject.Properties.Name -contains "attemptCount")) {
                 $task | Add-Member -NotePropertyName attemptCount -NotePropertyValue 0 -Force
@@ -796,6 +1209,7 @@ function Invoke-AcceptanceGate {
 
 function Invoke-Watchdog {
     if ([string]::IsNullOrWhiteSpace($Project)) { throw "Please provide -Project" }
+    Set-CurrentWorkflow -ProjectId $Project -Source "watchdog"
     $round = 0
     Write-Host "Starting watchdog for project '$Project' (interval=${Interval}s, maxRounds=$MaxRounds)..." -ForegroundColor Cyan
     while ($true) {
@@ -882,6 +1296,9 @@ function Invoke-Watchdog {
                 Add-MetricEvent -ProjectId $Project -EventType "done"
             }
             Add-MetricEvent -ProjectId $Project -EventType "reviewed"
+            if (-not ($task.PSObject.Properties.Name -contains "leaseUntil")) {
+                $task | Add-Member -NotePropertyName leaseUntil -NotePropertyValue $null -Force
+            }
             $task.leaseUntil = $null
             $task.updatedAt = (Get-Timestamp)
             Write-JsonFile -Path $file -Data $task
@@ -924,6 +1341,9 @@ function Invoke-Review {
         Add-MetricEvent -ProjectId $Project -EventType "done"
     }
     Add-MetricEvent -ProjectId $Project -EventType "reviewed"
+    if (-not ($task.PSObject.Properties.Name -contains "leaseUntil")) {
+        $task | Add-Member -NotePropertyName leaseUntil -NotePropertyValue $null -Force
+    }
     $task.leaseUntil = $null
     $task.updatedAt = (Get-Timestamp)
     Write-JsonFile -Path $file -Data $task
@@ -969,6 +1389,7 @@ function Invoke-Metrics {
 function Invoke-Dashboard {
     if ([string]::IsNullOrWhiteSpace($Project)) { throw "Please provide -Project" }
     Invoke-Init
+    Set-CurrentWorkflow -ProjectId $Project -Source "dashboard"
     $resolvedClaudeCount = Resolve-ClaudeCount -ProjectId $Project
     if ($resolvedClaudeCount -lt 0 -or $resolvedClaudeCount -gt 6) {
         throw "ClaudeCount must be between 0 and 6."
@@ -981,11 +1402,14 @@ function Invoke-Dashboard {
 
     $rootEscaped = $Root.Replace("'", "''")
     $projectEscaped = $Project.Replace("'", "''")
+    $ports = Read-JsonFile -Path $PortsFile
+    $opencodePort = Get-PortValue -Ports $ports -Name "opencode" -Fallback ($ReservedPortStart + 4)
+    $deepseekPort = Get-PortValue -Ports $ports -Name "deepseek" -Fallback ($ReservedPortStart + 5)
 
     $topCmd = "cd '$rootEscaped'; Write-Host '=== Cursor Agent (主控/C位) ===' -ForegroundColor Cyan; if (Get-Command cursor -ErrorAction SilentlyContinue) { cursor agent } else { Write-Host 'cursor command not found, fallback to shell.' -ForegroundColor Yellow; powershell -NoExit }"
-    $opsCmd = "cd '$rootEscaped'; while (`$true) { Clear-Host; Write-Host '=== Ops Console ===' -ForegroundColor Cyan; Write-Host 'Project: $projectEscaped' -ForegroundColor DarkCyan; Write-Host ''; powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 status; Write-Host ''; powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 metrics -Project '$projectEscaped'; Write-Host ''; Write-Host 'Commands:' -ForegroundColor DarkCyan; Write-Host '  watchdog: powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 watchdog -Project $projectEscaped'; Write-Host '  cache:    powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 cache-stats'; Write-Host '  review:   powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 review -Project $projectEscaped -TaskId <id>'; Write-Host ''; if (Test-Path '.\runtime\alerts.log') { Write-Host 'Latest alerts:' -ForegroundColor Yellow; Get-Content '.\runtime\alerts.log' | Select-Object -Last 5 }; Start-Sleep -Seconds 8 }"
-    $bottomLeftCmd = "cd '$rootEscaped'; Write-Host '=== OpenCode ===' -ForegroundColor Cyan; if (Get-Command opencode -ErrorAction SilentlyContinue) { opencode } else { Write-Host 'opencode command not found.' -ForegroundColor Yellow; powershell -NoExit }"
-    $deepseekCmd = "cd '$rootEscaped'; Write-Host '=== DeepSeek-TUI ===' -ForegroundColor Cyan; if (Get-Command deepseek -ErrorAction SilentlyContinue) { deepseek } else { Write-Host 'deepseek command not found.' -ForegroundColor Yellow; powershell -NoExit }"
+    $opsCmd = "cd '$rootEscaped'; while (`$true) { Clear-Host; Write-Host '=== Ops Console ===' -ForegroundColor Cyan; Write-Host 'Project: $projectEscaped' -ForegroundColor DarkCyan; Write-Host ''; powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 status; Write-Host ''; powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 metrics -Project '$projectEscaped'; Write-Host ''; Write-Host 'Callback bridge tick:' -ForegroundColor DarkCyan; powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 consume-callbacks; Write-Host ''; Write-Host 'Commands:' -ForegroundColor DarkCyan; Write-Host '  watchdog: powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 watchdog -Project $projectEscaped'; Write-Host '  cache:    powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 cache-stats'; Write-Host '  review:   powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 review -Project $projectEscaped -TaskId <id>'; Write-Host ''; if (Test-Path '.\runtime\alerts.log') { Write-Host 'Latest alerts:' -ForegroundColor Yellow; Get-Content '.\runtime\alerts.log' | Select-Object -Last 5 }; Start-Sleep -Seconds 8 }"
+    $bottomLeftCmd = "cd '$rootEscaped'; Write-Host '=== OpenCode ===' -ForegroundColor Cyan; Write-Host 'Isolated Port: $opencodePort' -ForegroundColor DarkCyan; if (Get-Command opencode -ErrorAction SilentlyContinue) { opencode --port $opencodePort } else { Write-Host 'opencode command not found.' -ForegroundColor Yellow; powershell -NoExit }"
+    $deepseekCmd = "cd '$rootEscaped'; Write-Host '=== DeepSeek-TUI ===' -ForegroundColor Cyan; Write-Host 'Reserved Port: $deepseekPort (for sidecar/serve mode)' -ForegroundColor DarkCyan; if (Get-Command deepseek-tui -ErrorAction SilentlyContinue) { deepseek-tui --workspace '$rootEscaped' } elseif (Get-Command deepseek -ErrorAction SilentlyContinue) { deepseek } else { Write-Host 'deepseek/deepseek-tui command not found.' -ForegroundColor Yellow; powershell -NoExit }"
     $claudeCmds = @(
         "cd '$rootEscaped'; Write-Host '=== Claude-1 ===' -ForegroundColor Cyan; if (Get-Command claude -ErrorAction SilentlyContinue) { claude } else { Write-Host 'claude command not found.' -ForegroundColor Yellow; powershell -NoExit }",
         "cd '$rootEscaped'; Write-Host '=== Claude-2 ===' -ForegroundColor Cyan; if (Get-Command claude -ErrorAction SilentlyContinue) { claude } else { Write-Host 'claude command not found.' -ForegroundColor Yellow; powershell -NoExit }",
@@ -994,27 +1418,32 @@ function Invoke-Dashboard {
         "cd '$rootEscaped'; Write-Host '=== Claude-5 ===' -ForegroundColor Cyan; if (Get-Command claude -ErrorAction SilentlyContinue) { claude } else { Write-Host 'claude command not found.' -ForegroundColor Yellow; powershell -NoExit }",
         "cd '$rootEscaped'; Write-Host '=== Claude-6 ===' -ForegroundColor Cyan; if (Get-Command claude -ErrorAction SilentlyContinue) { claude } else { Write-Host 'claude command not found.' -ForegroundColor Yellow; powershell -NoExit }"
     )
+    $topEncoded = New-EncodedCommand -ScriptText $topCmd
+    $opsEncoded = New-EncodedCommand -ScriptText $opsCmd
+    $bottomLeftEncoded = New-EncodedCommand -ScriptText $bottomLeftCmd
+    $deepseekEncoded = New-EncodedCommand -ScriptText $deepseekCmd
+    $claudeEncoded = @($claudeCmds | ForEach-Object { New-EncodedCommand -ScriptText $_ })
 
-    # Layout (similar to user screenshot):
-    # Top: main control pane (Cursor Agent)
+    # Stable layout:
+    # Top: main control + ops
     # Bottom-left: OpenCode
-    # Bottom-right: vertical queue (DeepSeek + dynamic Claude panes)
+    # Bottom-right: DeepSeek + dynamic Claude panes
     $wtArgs = @(
-        "-w", "0", "new-tab", "--title", "Main-Control", "powershell", "-NoExit", "-Command", $topCmd,
-        ";", "split-pane", "-H", "--size", "0.78", "--title", "Ops-Console", "powershell", "-NoExit", "-Command", $opsCmd,
-        ";", "split-pane", "-V", "--size", "0.38", "--title", "OpenCode", "powershell", "-NoExit", "-Command", $bottomLeftCmd,
+        "-w", "0", "new-tab", "--title", "Main-Control", "powershell", "-NoExit", "-EncodedCommand", $topEncoded,
+        ";", "split-pane", "-H", "--size", "0.78", "--title", "Ops-Console", "powershell", "-NoExit", "-EncodedCommand", $opsEncoded,
+        ";", "split-pane", "-V", "--size", "0.38", "--title", "OpenCode", "powershell", "-NoExit", "-EncodedCommand", $bottomLeftEncoded,
         ";", "focus-pane", "-t", "1",
-        ";", "split-pane", "-H", "--size", "0.66", "--title", "DeepSeek-TUI", "powershell", "-NoExit", "-Command", $deepseekCmd
+        ";", "split-pane", "-H", "--size", "0.66", "--title", "DeepSeek-TUI", "powershell", "-NoExit", "-EncodedCommand", $deepseekEncoded
     )
 
-    # Right column starts at pane index 2; stack Claude panes vertically there.
+    # DeepSeek pane index is 2 in this stable layout; stack Claude panes vertically there.
     for ($i = 0; $i -lt $resolvedClaudeCount; $i++) {
         $wtArgs += @(";", "focus-pane", "-t", "2")
-        $wtArgs += @(";", "split-pane", "-V", "--size", "0.66", "--title", "Claude-$($i+1)", "powershell", "-NoExit", "-Command", $claudeCmds[$i])
+        $wtArgs += @(";", "split-pane", "-V", "--size", "0.66", "--title", "Claude-$($i+1)", "powershell", "-NoExit", "-EncodedCommand", $claudeEncoded[$i])
     }
 
     & wt @wtArgs | Out-Null
-    Write-Host "[OK] dashboard launched: top=Main-Control, bottom-left=OpenCode, right-column=DeepSeek+Claude($resolvedClaudeCount)" -ForegroundColor Green
+    Write-Host "[OK] dashboard launched: Main-Control + Ops(with callback tick) + OpenCode + DeepSeek+Claude($resolvedClaudeCount)" -ForegroundColor Green
     Write-Host "[INFO] If you are not running inside Windows Terminal, this opens a separate WT window." -ForegroundColor Yellow
 }
 
@@ -1035,16 +1464,25 @@ function Invoke-CheckPorts {
     }
 
     $samplePorts = @(
-        [int]$ports.defaults.hub,
-        [int]$ports.defaults.api,
-        [int]$ports.defaults.dashboard,
-        [int]$ports.defaults.reviewer
+        (Get-PortValue -Ports $ports -Name "hub" -Fallback $ReservedPortStart),
+        (Get-PortValue -Ports $ports -Name "api" -Fallback ($ReservedPortStart + 1)),
+        (Get-PortValue -Ports $ports -Name "dashboard" -Fallback ($ReservedPortStart + 2)),
+        (Get-PortValue -Ports $ports -Name "reviewer" -Fallback ($ReservedPortStart + 3)),
+        (Get-PortValue -Ports $ports -Name "opencode" -Fallback ($ReservedPortStart + 4)),
+        (Get-PortValue -Ports $ports -Name "deepseek" -Fallback ($ReservedPortStart + 5))
     )
 
     foreach ($p in $samplePorts) {
+        if (($p -lt $reservedStart) -or ($p -gt $reservedEnd)) {
+            throw "Default port $p is outside reserved range $reservedStart-$reservedEnd."
+        }
         if (($p -ge $conflictStart) -and ($p -le $conflictEnd)) {
             throw "Default port $p conflicts with reserved range used by other repos."
         }
+    }
+
+    if ((@($samplePorts | Select-Object -Unique)).Count -ne $samplePorts.Count) {
+        throw "Default ports contain duplicates. Please use unique isolated ports."
     }
 
     Write-Host "[OK] No overlap with autolook/deepseek_autolook port range." -ForegroundColor Green
@@ -1117,6 +1555,473 @@ function Invoke-E2ECheck {
     Write-Host "[OK] E2E check passed: ready -> in_progress -> in_review -> done" -ForegroundColor Green
 }
 
+function Invoke-ServeDeepSeek {
+    Invoke-Init
+    $ports = Read-JsonFile -Path $PortsFile
+    $deepseekPort = Get-PortValue -Ports $ports -Name "deepseek" -Fallback ($ReservedPortStart + 5)
+    Write-Host ("Starting DeepSeek runtime API on isolated port {0}..." -f $deepseekPort) -ForegroundColor Cyan
+    if (-not (Get-Command deepseek-tui -ErrorAction SilentlyContinue)) {
+        throw "deepseek-tui command not found."
+    }
+    & deepseek-tui serve --http --host 127.0.0.1 --port $deepseekPort
+}
+
+function Invoke-ServeOpenCode {
+    Invoke-Init
+    $ports = Read-JsonFile -Path $PortsFile
+    $opencodePort = Get-PortValue -Ports $ports -Name "opencode" -Fallback ($ReservedPortStart + 4)
+    Write-Host ("Starting OpenCode headless server on isolated port {0}..." -f $opencodePort) -ForegroundColor Cyan
+    if (-not (Get-Command opencode -ErrorAction SilentlyContinue)) {
+        throw "opencode command not found."
+    }
+    $serverPassword = [string]$env:OPENCODE_SERVER_PASSWORD
+    if ([string]::IsNullOrWhiteSpace($serverPassword) -and -not $AllowInsecure) {
+        throw "OPENCODE_SERVER_PASSWORD is not set. Refusing insecure startup. Use -AllowInsecure to override for local temporary testing."
+    }
+    if ([string]::IsNullOrWhiteSpace($serverPassword) -and $AllowInsecure) {
+        Write-Host "[WARN] OPENCODE_SERVER_PASSWORD is not set, starting insecure server by explicit override." -ForegroundColor Yellow
+    }
+    & opencode serve --hostname 127.0.0.1 --port $opencodePort
+}
+
+function Invoke-CurrentWorkflow {
+    Invoke-Init
+    $current = Get-CurrentWorkflow
+    if (-not $current) {
+        Write-Host "No current workflow marker found." -ForegroundColor Yellow
+        return
+    }
+    Write-Host ("Current Workflow: {0}" -f $current.projectId) -ForegroundColor Cyan
+    if ($current.PSObject.Properties.Name -contains "source") {
+        Write-Host ("  source: {0}" -f $current.source)
+    }
+    if ($current.PSObject.Properties.Name -contains "updatedAt") {
+        Write-Host ("  updatedAt: {0}" -f $current.updatedAt)
+    }
+}
+
+function Invoke-AgentDone {
+    if ([string]::IsNullOrWhiteSpace($Project)) { throw "Please provide -Project" }
+    if ([string]::IsNullOrWhiteSpace($TaskId)) { throw "Please provide -TaskId" }
+
+    $file = Get-TaskFilePath -ProjectId $Project -TaskId $TaskId
+    if (-not (Test-Path $file)) { throw "Task not found: $TaskId" }
+    $task = Read-JsonFile -Path $file
+
+    if ($task.status -eq "done") {
+        Write-Host ("[SKIP] task already done: {0}" -f $TaskId) -ForegroundColor Yellow
+        return
+    }
+    if ($task.status -eq "blocked") {
+        throw "Task is blocked: $TaskId. Unblock it first before agent-done."
+    }
+
+    if (-not ($task.PSObject.Properties.Name -contains "notes")) {
+        $task | Add-Member -NotePropertyName notes -NotePropertyValue @() -Force
+    }
+    $doneNote = if ([string]::IsNullOrWhiteSpace($Note)) { "AGENT-DONE: external agent reported completion." } else { "AGENT-DONE: $Note" }
+    $task.notes += ([ordered]@{
+        at = (Get-Timestamp)
+        text = $doneNote
+    })
+    $task.status = "in_review"
+    if (-not ($task.PSObject.Properties.Name -contains "leaseUntil")) {
+        $task | Add-Member -NotePropertyName leaseUntil -NotePropertyValue $null -Force
+    }
+    $task.leaseUntil = $null
+    $task.updatedAt = (Get-Timestamp)
+    Write-JsonFile -Path $file -Data $task
+    Set-CurrentWorkflow -ProjectId $Project -Source "agent-done"
+    Write-Host ("[OK] agent-done: {0} -> in_review" -f $TaskId) -ForegroundColor Green
+
+    if ($AutoContinue) {
+        $prevProject = $script:Project
+        $prevTaskId = $script:TaskId
+        $prevInterval = $script:Interval
+        $prevMaxRounds = $script:MaxRounds
+        $script:Project = $Project
+        $script:TaskId = $TaskId
+        Invoke-Review
+        $script:Project = $Project
+        $script:Interval = 1
+        $script:MaxRounds = 1
+        Invoke-Watchdog
+        $script:Project = $prevProject
+        $script:TaskId = $prevTaskId
+        $script:Interval = $prevInterval
+        $script:MaxRounds = $prevMaxRounds
+    }
+}
+
+function Invoke-CloseOpen {
+    Invoke-Init
+    $projectDirs = @()
+    if (-not [string]::IsNullOrWhiteSpace($Project)) {
+        $p = Require-Project -ProjectId $Project
+        $projectDirs = @((Get-Item -Path $p.Dir))
+    } else {
+        $projectDirs = @(Get-ChildItem -Path $ProjectsDir -Directory -ErrorAction SilentlyContinue)
+    }
+    $closed = 0
+    $skippedBlocked = 0
+    foreach ($pd in $projectDirs) {
+        $projId = $pd.Name
+        $taskFiles = @(Get-ChildItem -Path (Join-Path $pd.FullName "tasks") -Filter "*.json" -ErrorAction SilentlyContinue)
+        foreach ($tf in $taskFiles) {
+            $t = Read-JsonFile -Path $tf.FullName
+            if ($t.status -eq "done") { continue }
+            if ($t.status -eq "blocked") { $skippedBlocked++; continue }
+            $script:Project = $projId
+            $script:TaskId = [string]$t.id
+            $script:Note = "AUTO-CLOSE: one-click closure."
+            $script:AutoContinue = $false
+            Invoke-AgentDone
+            $script:Project = $projId
+            $script:TaskId = [string]$t.id
+            Invoke-Review
+            $closed++
+        }
+    }
+    Write-Host ("[OK] close-open completed: closed={0} skippedBlocked={1}" -f $closed, $skippedBlocked) -ForegroundColor Green
+}
+
+function Invoke-ConsumeCallbacks {
+    Invoke-Init
+    $files = @(Get-ChildItem -Path $CallbacksDir -Filter "*.json" -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime)
+    if ($files.Count -eq 0) {
+        Write-Host "No callback files to consume." -ForegroundColor Yellow
+        return
+    }
+    $ok = 0
+    $failed = 0
+    foreach ($f in $files) {
+        try {
+            $payload = Read-JsonFile -Path $f.FullName
+            if (-not ($payload.PSObject.Properties.Name -contains "project")) { throw "missing field: project" }
+            if (-not ($payload.PSObject.Properties.Name -contains "taskId")) { throw "missing field: taskId" }
+            $script:Project = [string]$payload.project
+            $script:TaskId = [string]$payload.taskId
+            $script:Note = if ($payload.PSObject.Properties.Name -contains "note") { [string]$payload.note } else { "callback queue consumed" }
+            $script:AutoContinue = $false
+            if ($payload.PSObject.Properties.Name -contains "autoContinue") {
+                $script:AutoContinue = [bool]$payload.autoContinue
+            }
+            Invoke-AgentDone
+            $ok++
+            Move-Item -Path $f.FullName -Destination (Join-Path $CallbacksProcessedDir ($f.BaseName + ".done.json")) -Force
+        } catch {
+            $failed++
+            $errFile = Join-Path $CallbacksProcessedDir ($f.BaseName + ".error.txt")
+            Set-Content -Path $errFile -Value ([string]$_) -Encoding UTF8
+            Move-Item -Path $f.FullName -Destination (Join-Path $CallbacksProcessedDir ($f.BaseName + ".failed.json")) -Force
+        }
+    }
+    Write-Host ("[OK] consume-callbacks finished: ok={0} failed={1}" -f $ok, $failed) -ForegroundColor Green
+}
+
+function Invoke-WatchCallbacks {
+    Invoke-Init
+    $round = 0
+    Write-Host ("Watching callbacks in {0} (interval={1}s, maxRounds={2})..." -f $CallbacksDir, $Interval, $MaxRounds) -ForegroundColor Cyan
+    while ($true) {
+        $round++
+        $stamp = Get-Date -Format "HH:mm:ss"
+        Write-Host ("[{0}] watch-callbacks round={1}" -f $stamp, $round) -ForegroundColor DarkCyan
+        Invoke-ConsumeCallbacks
+
+        if ($MaxRounds -gt 0 -and $round -ge $MaxRounds) {
+            Write-Host ("watch-callbacks max rounds reached: {0}" -f $MaxRounds) -ForegroundColor Yellow
+            break
+        }
+        Start-Sleep -Seconds $Interval
+    }
+}
+
+function Invoke-SupervisorEvolutionStatus {
+    Invoke-Init
+    $evo = Get-SupervisorEvolutionConfig
+    Write-Host "Supervisor Evolution" -ForegroundColor Cyan
+    Write-Host ("  stepApplied={0}/{1}" -f $evo.stepApplied, $evo.maxSteps)
+    Write-Host ("  includeStatusInHash={0}" -f $evo.includeStatusInHash)
+    Write-Host ("  recentNotesCountInHash={0}" -f $evo.recentNotesCountInHash)
+    Write-Host ("  minCacheSamples={0}" -f $evo.minCacheSamples)
+    Write-Host ("  cacheHitRateThreshold={0}" -f $evo.cacheHitRateThreshold)
+    Write-Host ("  updatedAt={0}" -f $evo.updatedAt) -ForegroundColor DarkGray
+    if ($evo.history -and @($evo.history).Count -gt 0) {
+        Write-Host "  history:" -ForegroundColor DarkCyan
+        foreach ($h in @($evo.history | Select-Object -Last 5)) {
+            Write-Host ("    - {0}" -f [string]$h)
+        }
+    }
+}
+
+function Get-AgentDefaultTier {
+    param([string]$Assignee)
+    $name = if ($Assignee) { $Assignee.ToLowerInvariant() } else { "" }
+    switch ($name) {
+        "cursor" { return "small" }
+        "opencode" { return "small" }
+        "deepseek" { return "mid" }
+        "claude" { return "large" }
+        "apinebula" { return "xlarge" }
+        default { return "mid" }
+    }
+}
+
+function Get-TaskOutcomePenalty {
+    param([object]$TaskData)
+    $reworkPenalty = 0
+    if ($TaskData.PSObject.Properties.Name -contains "attemptCount") {
+        $attempts = [int]$TaskData.attemptCount
+        if ($attempts -gt 1) {
+            $reworkPenalty += ($attempts - 1)
+        }
+    }
+    if ($TaskData.PSObject.Properties.Name -contains "notes") {
+        $texts = @($TaskData.notes | ForEach-Object { [string]$_.text })
+        $reworkPenalty += @($texts | Where-Object { $_ -match "AUTO-REVIEW: issues found" }).Count
+    }
+    return $reworkPenalty
+}
+
+function Get-TaskHistoryFiles {
+    $taskFiles = @()
+    $projectDirs = @(Get-ChildItem -Path $ProjectsDir -Directory -ErrorAction SilentlyContinue)
+    foreach ($pd in $projectDirs) {
+        $taskDir = Join-Path $pd.FullName "tasks"
+        if (Test-Path $taskDir) {
+            $taskFiles += @(Get-ChildItem -Path $taskDir -Filter "*.json" -File -ErrorAction SilentlyContinue)
+        }
+    }
+    return @($taskFiles)
+}
+
+function Invoke-EvolveRouting {
+    Invoke-Init
+    $routing = Read-JsonFile -Path $RoutingFile
+    $evo = Get-SupervisorEvolutionConfig
+
+    if (-not ($evo.PSObject.Properties.Name -contains "routingEvolution")) {
+        $evo | Add-Member -NotePropertyName routingEvolution -NotePropertyValue ([pscustomobject]@{
+            minSamplesPerTaskType = 2
+            minScoreDelta = 2
+            maxAdjustmentsPerRun = 2
+            updatedAt = (Get-Timestamp)
+            history = @()
+        }) -Force
+        Write-JsonFile -Path $SupervisorEvolutionFile -Data $evo
+    }
+
+    $cfg = $evo.routingEvolution
+    $taskFiles = @()
+    $projectDirs = @(Get-ChildItem -Path $ProjectsDir -Directory -ErrorAction SilentlyContinue)
+    foreach ($pd in $projectDirs) {
+        $taskDir = Join-Path $pd.FullName "tasks"
+        if (Test-Path $taskDir) {
+            $taskFiles += @(Get-ChildItem -Path $taskDir -Filter "*.json" -File -ErrorAction SilentlyContinue)
+        }
+    }
+    if ($taskFiles.Count -eq 0) {
+        Write-Host "[SKIP] no task history for routing evolution." -ForegroundColor Yellow
+        return
+    }
+
+    $taskStats = @{}
+    foreach ($tf in $taskFiles) {
+        $task = Read-JsonFile -Path $tf.FullName
+        $taskType = if ($task.PSObject.Properties.Name -contains "taskType") { [string]$task.taskType } else { "general" }
+        $assignee = if ($task.PSObject.Properties.Name -contains "assignee") { [string]$task.assignee } else { "" }
+        $status = if ($task.PSObject.Properties.Name -contains "status") { [string]$task.status } else { "" }
+
+        if ([string]::IsNullOrWhiteSpace($assignee)) { continue }
+        if (Contains-ApiNebula -Text $assignee) { continue }
+        if ($status -notin @("done", "blocked")) { continue }
+
+        if (-not $taskStats.ContainsKey($taskType)) {
+            $taskStats[$taskType] = @{}
+        }
+        if (-not $taskStats[$taskType].ContainsKey($assignee)) {
+            $taskStats[$taskType][$assignee] = [ordered]@{ samples = 0; done = 0; blocked = 0; score = 0 }
+        }
+
+        $row = $taskStats[$taskType][$assignee]
+        $row.samples = [int]$row.samples + 1
+        if ($status -eq "done") {
+            $row.done = [int]$row.done + 1
+            $row.score = [int]$row.score + 2
+        } elseif ($status -eq "blocked") {
+            $row.blocked = [int]$row.blocked + 1
+            $row.score = [int]$row.score - 3
+        }
+    }
+
+    $adjustments = 0
+    $historyLines = @()
+    foreach ($taskType in @("bugfix", "refactor", "review", "general")) {
+        if (-not $taskStats.ContainsKey($taskType)) { continue }
+        $agentTable = $taskStats[$taskType]
+        $candidates = @($agentTable.Keys | ForEach-Object {
+            $r = $agentTable[$_]
+            [pscustomobject]@{
+                assignee = [string]$_
+                samples = [int]$r.samples
+                done = [int]$r.done
+                blocked = [int]$r.blocked
+                score = [int]$r.score
+            }
+        } | Where-Object { $_.samples -ge [int]$cfg.minSamplesPerTaskType } | Sort-Object score, done, samples -Descending)
+
+        if ($candidates.Count -eq 0) { continue }
+        $best = $candidates[0]
+        $current = $routing.byTaskType.$taskType
+        $currentAssignee = [string]$current.assignee
+
+        $currentCandidate = $candidates | Where-Object { $_.assignee -eq $currentAssignee } | Select-Object -First 1
+        $currentScore = if ($currentCandidate) { [int]$currentCandidate.score } else { -999 }
+        $delta = [int]$best.score - [int]$currentScore
+
+        if ($best.assignee -ne $currentAssignee -and $delta -ge [int]$cfg.minScoreDelta -and $adjustments -lt [int]$cfg.maxAdjustmentsPerRun) {
+            $current.assignee = $best.assignee
+            $current.modelTier = Get-AgentDefaultTier -Assignee $best.assignee
+            $adjustments++
+            $historyLines += ("[{0}] taskType={1} assignee {2} -> {3} (score delta={4}, samples={5})" -f (Get-Timestamp), $taskType, $currentAssignee, $best.assignee, $delta, $best.samples)
+        }
+    }
+
+    if ($adjustments -eq 0) {
+        Write-Host "[EvolveRouting] no bounded routing change applied." -ForegroundColor Yellow
+        return
+    }
+
+    $routing.updatedAt = (Get-Timestamp)
+    Write-JsonFile -Path $RoutingFile -Data $routing
+    $cfg.updatedAt = (Get-Timestamp)
+    $cfg.history = @($cfg.history + $historyLines)
+    $evo.updatedAt = (Get-Timestamp)
+    Write-JsonFile -Path $SupervisorEvolutionFile -Data $evo
+    Write-Host ("[OK] routing evolution applied: adjustments={0}" -f $adjustments) -ForegroundColor Green
+    foreach ($line in $historyLines) {
+        Write-Host ("  - {0}" -f $line) -ForegroundColor DarkCyan
+    }
+}
+
+function Invoke-EvolveReliability {
+    Invoke-Init
+    $routing = Read-JsonFile -Path $RoutingFile
+    $evo = Get-SupervisorEvolutionConfig
+
+    if (-not ($evo.PSObject.Properties.Name -contains "reliabilityEvolution")) {
+        $evo | Add-Member -NotePropertyName reliabilityEvolution -NotePropertyValue ([pscustomobject]@{
+            minSamplesPerReviewer = 2
+            minScoreDelta = 2
+            maxAdjustmentsPerRun = 2
+            updatedAt = (Get-Timestamp)
+            history = @()
+        }) -Force
+        Write-JsonFile -Path $SupervisorEvolutionFile -Data $evo
+    }
+
+    $cfg = $evo.reliabilityEvolution
+    $taskFiles = Get-TaskHistoryFiles
+    if ($taskFiles.Count -eq 0) {
+        Write-Host "[SKIP] no task history for reliability evolution." -ForegroundColor Yellow
+        return
+    }
+
+    $reviewerStats = @{}
+    $assigneeStats = @{}
+
+    foreach ($tf in $taskFiles) {
+        $task = Read-JsonFile -Path $tf.FullName
+        $taskType = if ($task.PSObject.Properties.Name -contains "taskType") { [string]$task.taskType } else { "general" }
+        $status = if ($task.PSObject.Properties.Name -contains "status") { [string]$task.status } else { "" }
+        if ($status -notin @("done", "blocked")) { continue }
+
+        $penalty = Get-TaskOutcomePenalty -TaskData $task
+        $baseScore = if ($status -eq "done") { 2 } else { -3 }
+        $finalScore = $baseScore - $penalty
+
+        $assignee = if ($task.PSObject.Properties.Name -contains "assignee") { [string]$task.assignee } else { "" }
+        if (-not [string]::IsNullOrWhiteSpace($assignee) -and -not (Contains-ApiNebula -Text $assignee)) {
+            if (-not $assigneeStats.ContainsKey($assignee)) {
+                $assigneeStats[$assignee] = [ordered]@{ samples = 0; done = 0; blocked = 0; rework = 0; score = 0 }
+            }
+            $a = $assigneeStats[$assignee]
+            $a.samples = [int]$a.samples + 1
+            if ($status -eq "done") { $a.done = [int]$a.done + 1 } else { $a.blocked = [int]$a.blocked + 1 }
+            $a.rework = [int]$a.rework + $penalty
+            $a.score = [int]$a.score + $finalScore
+        }
+
+        $reviewer = if ($task.PSObject.Properties.Name -contains "reviewer") { [string]$task.reviewer } else { "" }
+        if ([string]::IsNullOrWhiteSpace($reviewer) -or (Contains-ApiNebula -Text $reviewer)) { continue }
+        if (-not $reviewerStats.ContainsKey($taskType)) {
+            $reviewerStats[$taskType] = @{}
+        }
+        if (-not $reviewerStats[$taskType].ContainsKey($reviewer)) {
+            $reviewerStats[$taskType][$reviewer] = [ordered]@{ samples = 0; done = 0; blocked = 0; rework = 0; score = 0 }
+        }
+        $r = $reviewerStats[$taskType][$reviewer]
+        $r.samples = [int]$r.samples + 1
+        if ($status -eq "done") { $r.done = [int]$r.done + 1 } else { $r.blocked = [int]$r.blocked + 1 }
+        $r.rework = [int]$r.rework + $penalty
+        $r.score = [int]$r.score + $finalScore
+    }
+
+    $adjustments = 0
+    $historyLines = @()
+    foreach ($taskType in @("bugfix", "refactor", "review", "general")) {
+        if (-not $reviewerStats.ContainsKey($taskType)) { continue }
+        $table = $reviewerStats[$taskType]
+        $candidates = @($table.Keys | ForEach-Object {
+            $row = $table[$_]
+            [pscustomobject]@{
+                reviewer = [string]$_
+                samples = [int]$row.samples
+                done = [int]$row.done
+                blocked = [int]$row.blocked
+                rework = [int]$row.rework
+                score = [int]$row.score
+            }
+        } | Where-Object { $_.samples -ge [int]$cfg.minSamplesPerReviewer } | Sort-Object score, done, samples -Descending)
+
+        if ($candidates.Count -eq 0) { continue }
+        $best = $candidates[0]
+        $current = $routing.byTaskType.$taskType
+        $currentReviewer = [string]$current.reviewer
+        $currentCandidate = $candidates | Where-Object { $_.reviewer -eq $currentReviewer } | Select-Object -First 1
+        $currentScore = if ($currentCandidate) { [int]$currentCandidate.score } else { -999 }
+        $delta = [int]$best.score - [int]$currentScore
+
+        if ($best.reviewer -ne $currentReviewer -and $delta -ge [int]$cfg.minScoreDelta -and $adjustments -lt [int]$cfg.maxAdjustmentsPerRun) {
+            $current.reviewer = $best.reviewer
+            $adjustments++
+            $historyLines += ("[{0}] taskType={1} reviewer {2} -> {3} (score delta={4}, samples={5})" -f (Get-Timestamp), $taskType, $currentReviewer, $best.reviewer, $delta, $best.samples)
+        }
+    }
+
+    if ($adjustments -gt 0) {
+        $routing.updatedAt = (Get-Timestamp)
+        Write-JsonFile -Path $RoutingFile -Data $routing
+        $cfg.updatedAt = (Get-Timestamp)
+        $cfg.history = @($cfg.history + $historyLines)
+        $evo.updatedAt = (Get-Timestamp)
+        Write-JsonFile -Path $SupervisorEvolutionFile -Data $evo
+        Write-Host ("[OK] reliability evolution applied: adjustments={0}" -f $adjustments) -ForegroundColor Green
+        foreach ($line in $historyLines) {
+            Write-Host ("  - {0}" -f $line) -ForegroundColor DarkCyan
+        }
+    } else {
+        Write-Host "[EvolveReliability] no bounded reviewer change applied." -ForegroundColor Yellow
+    }
+
+    Write-Host "Agent Reliability Snapshot" -ForegroundColor Cyan
+    foreach ($name in @($assigneeStats.Keys | Sort-Object)) {
+        $row = $assigneeStats[$name]
+        Write-Host ("  {0}: score={1} samples={2} done={3} blocked={4} rework={5}" -f $name, $row.score, $row.samples, $row.done, $row.blocked, $row.rework) -ForegroundColor DarkGray
+    }
+}
+
 function Show-Help {
     Write-Host ""
     Write-Host "Cursor Autolook — Cursor as execution hub" -ForegroundColor Cyan
@@ -1125,7 +2030,13 @@ function Show-Help {
     Write-Host "  init"
     Write-Host "  new-project -Name <name>"
     Write-Host "  new-task -Project <project-id> -Title <title> [-TaskType bugfix|refactor|review|general] [-Assignee ...] [-Reviewer ...] [-Artifacts a,b] [-TestCommand ...] [-MaxAttempts N]"
+    Write-Host "           [-NoAutoRoute]                            # disable model routing for this task"
+    Write-Host "           [-ApproveExpensive]                       # required when policy demands explicit approval"
     Write-Host "  set-task -Project <project-id> -TaskId <id> [-Status ready|in_progress|in_review|done|blocked] [-Note ...]"
+    Write-Host "  agent-done -Project <project-id> -TaskId <id> [-Note ...] [-AutoContinue]"
+    Write-Host "  close-open [-Project <project-id>]                 # one-click close non-blocked open tasks"
+    Write-Host "  consume-callbacks                                  # consume runtime/callbacks/*.json queue"
+    Write-Host "  watch-callbacks [-Interval 30] [-MaxRounds 0]     # continuously consume callback queue"
     Write-Host "  status"
     Write-Host "  next -Project <project-id>"
     Write-Host "  reconcile -Project <project-id>"
@@ -1135,7 +2046,16 @@ function Show-Help {
     Write-Host "  cache-stats                                        # prompt cache hit/miss stats"
     Write-Host "  set-project-prefix -Project <project-id> -ProjectPrefix <text>"
     Write-Host "  enter-workflow -Project <project-id> [-TaskId <id>]   # bootstrap status/metrics/brief"
+    Write-Host "  current-workflow                                   # show active workflow marker"
+    Write-Host "  routing config: runtime/routing.json               # task routing + expensive provider policy"
+    Write-Host "                                                     # apinebula: default disabled; require approval; only when others all blocked"
     Write-Host "  dashboard -Project <project-id> [-ClaudeCount N]   # top main + bottom-left opencode + right stack"
+    Write-Host "  evolve-supervisor                                  # bounded cache-key evolution from runtime evidence"
+    Write-Host "  evolve-routing                                     # bounded assignee/modelTier evolution from task outcomes"
+    Write-Host "  evolve-reliability                                 # bounded reviewer evolution + agent reliability snapshot"
+    Write-Host "  supervisor-evolution                               # show evolution config and recent steps"
+    Write-Host "  serve-deepseek                                      # start deepseek runtime api on isolated port"
+    Write-Host "  serve-opencode [-AllowInsecure]                     # start opencode headless server on isolated port"
     Write-Host "  metrics [-Project <project-id>]"
     Write-Host "  check-ports"
     Write-Host "  quick-check"
@@ -1148,6 +2068,10 @@ switch ($Command) {
     "new-project" { Invoke-NewProject }
     "new-task"    { Invoke-NewTask }
     "set-task"    { Invoke-SetTask }
+    "agent-done"  { Invoke-AgentDone }
+    "close-open"  { Invoke-CloseOpen }
+    "consume-callbacks" { Invoke-ConsumeCallbacks }
+    "watch-callbacks" { Invoke-WatchCallbacks }
     "status"      { Invoke-Status }
     "next"        { Invoke-Next }
     "reconcile"   { Invoke-Reconcile }
@@ -1157,7 +2081,14 @@ switch ($Command) {
     "cache-stats" { Invoke-CacheStats }
     "set-project-prefix" { Invoke-SetProjectPrefix }
     "enter-workflow" { Invoke-EnterWorkflow }
+    "current-workflow" { Invoke-CurrentWorkflow }
     "dashboard"   { Invoke-Dashboard }
+    "evolve-supervisor" { Invoke-EvolveSupervisor }
+    "evolve-routing" { Invoke-EvolveRouting }
+    "evolve-reliability" { Invoke-EvolveReliability }
+    "supervisor-evolution" { Invoke-SupervisorEvolutionStatus }
+    "serve-deepseek" { Invoke-ServeDeepSeek }
+    "serve-opencode" { Invoke-ServeOpenCode }
     "metrics"     { Invoke-Metrics }
     "check-ports" { Invoke-CheckPorts }
     "quick-check" { Invoke-QuickCheck }
