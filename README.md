@@ -69,6 +69,9 @@ powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 prep-brief -Proje
 # 查看提示词缓存命中率
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 cache-stats
 
+# 冻结项目级长前缀（高频复用上下文）
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 set-project-prefix -Project my-project -ProjectPrefix "Core stack: React+Node; coding style: minimal diffs; tests required for behavior changes."
+
 # 更新任务状态
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 set-task -Project my-project -TaskId <task-id> -Status in_review
 ```
@@ -112,6 +115,7 @@ runtime/
 - `review`：自动审查决策 + 强制验收门（产物存在、测试命令通过）。
 - `prep-brief`：按缓存策略生成任务 brief（尽量提高 token 缓存命中）。
 - `cache-stats`：查看缓存命中/未命中统计与命中率。
+- `set-project-prefix`：设置项目级长前缀（跨任务稳定复用上下文）。
 - `dashboard`：类似工作台布局（上方主控，左下 OpenCode，右侧纵向队列 DeepSeek + Claude）。默认自动计算 Claude 数量（按 `ready/in_progress/in_review` 任务数，范围 `1-6`）；也可用 `-ClaudeCount` 手动覆盖（`0-6`）。
 - `metrics`：查看累计吞吐指标（创建/分派/审查/完成/返工/阻断）。
 - `check-ports`：检查当前端口规划是否与其它仓库冲突。
@@ -124,6 +128,7 @@ runtime/
 - 已实现：告警钩子（写入 `runtime/alerts.log`，可选 `AUTOLOOK_ALERT_WEBHOOK` 推送）。
 - 已实现：提示词缓存（静态前缀 + 动态后缀哈希，记录 `cacheHit/cacheMiss`）。
 - 已实现：按任务类型的缓存模板版本化（`bugfix/refactor/review/general`）。
+- 已实现：项目级长前缀冻结（`project-prefix-v1.md`）。
 
 ## 端口规划
 

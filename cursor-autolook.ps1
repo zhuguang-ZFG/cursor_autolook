@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("help", "init", "new-project", "new-task", "set-task", "status", "next", "check-ports", "reconcile", "watchdog", "review", "dashboard", "quick-check", "e2e-check", "metrics", "prep-brief", "cache-stats")]
+    [ValidateSet("help", "init", "new-project", "new-task", "set-task", "status", "next", "check-ports", "reconcile", "watchdog", "review", "dashboard", "quick-check", "e2e-check", "metrics", "prep-brief", "cache-stats", "set-project-prefix")]
     [string]$Command = "help",
 
     [string]$Name,
@@ -15,6 +15,7 @@ param(
     [string]$Artifacts,
     [string]$TestCommand,
     [string]$TaskType,
+    [string]$ProjectPrefix,
     [int]$Interval = 30,
     [int]$MaxRounds = 0,
     [int]$LeaseMinutes = 45,
@@ -257,6 +258,36 @@ function Get-TaskCacheFile {
     return (Join-Path $projectCacheDir "$TaskId.cache.json")
 }
 
+function Get-ProjectPrefixFile {
+    param([string]$ProjectId)
+    $projectCacheDir = Join-Path $PromptCacheDir $ProjectId
+    Ensure-Directory $projectCacheDir
+    return (Join-Path $projectCacheDir "project-prefix-v1.md")
+}
+
+function Get-ProjectPrefixText {
+    param([string]$ProjectId)
+    $pFile = Get-ProjectPrefixFile -ProjectId $ProjectId
+    if (-not (Test-Path $pFile)) {
+        $defaultPrefix = @"
+Project invariant context:
+- Keep changes scoped to stated task objectives.
+- Reuse existing conventions and avoid broad rewrites.
+- Prefer minimal token usage and concise outputs.
+"@
+        Set-Content -Path $pFile -Value $defaultPrefix -Encoding UTF8
+    }
+    return (Get-Content -Path $pFile -Raw)
+}
+
+function Invoke-SetProjectPrefix {
+    if ([string]::IsNullOrWhiteSpace($Project)) { throw "Please provide -Project" }
+    if ([string]::IsNullOrWhiteSpace($ProjectPrefix)) { throw "Please provide -ProjectPrefix" }
+    $pFile = Get-ProjectPrefixFile -ProjectId $Project
+    Set-Content -Path $pFile -Value $ProjectPrefix -Encoding UTF8
+    Write-Host "[OK] project prefix updated: $pFile" -ForegroundColor Green
+}
+
 function Invoke-PrepBrief {
     if ([string]::IsNullOrWhiteSpace($Project)) { throw "Please provide -Project" }
     if ([string]::IsNullOrWhiteSpace($TaskId)) { throw "Please provide -TaskId" }
@@ -267,8 +298,9 @@ function Invoke-PrepBrief {
     $task = Read-JsonFile -Path $taskFile
     $taskType = if ($task.PSObject.Properties.Name -contains "taskType") { [string]$task.taskType } else { "general" }
     $prefixObj = Get-PromptPrefix -TaskType $taskType
+    $projectPrefix = Get-ProjectPrefixText -ProjectId $Project
     $dynamic = Build-DynamicTaskSuffix -ProjectId $Project -TaskData $task
-    $keySource = ($dynamic + "`n" + $prefixObj.text)
+    $keySource = ($dynamic + "`n" + $prefixObj.text + "`n" + $projectPrefix)
     $hash = (Get-FileHash -InputStream ([System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($keySource))) -Algorithm SHA256).Hash
     $cacheFile = Get-TaskCacheFile -ProjectId $Project -TaskId $TaskId
     $briefFile = Join-Path (Split-Path -Parent $cacheFile) "$TaskId.brief.md"
@@ -285,11 +317,12 @@ function Invoke-PrepBrief {
         Add-MetricEvent -ProjectId $Project -EventType "cacheHit"
         Write-Host "[CACHE HIT] brief unchanged: $briefFile" -ForegroundColor Green
     } else {
-        $brief = $prefixObj.text + "`n`n---`n`n" + $dynamic
+        $brief = $projectPrefix + "`n`n---`n`n" + $prefixObj.text + "`n`n---`n`n" + $dynamic
         Set-Content -Path $briefFile -Value $brief -Encoding UTF8
         Write-JsonFile -Path $cacheFile -Data ([ordered]@{
             hash = $hash
             taskType = $prefixObj.type
+            projectPrefixFile = (Get-ProjectPrefixFile -ProjectId $Project)
             briefPath = $briefFile
             updatedAt = (Get-Timestamp)
         })
@@ -415,6 +448,9 @@ function Invoke-Init {
     Ensure-Directory $PromptCacheDir
     foreach ($tt in @("general", "bugfix", "refactor", "review")) {
         Get-PromptPrefix -TaskType $tt | Out-Null
+    }
+    if ($Project) {
+        Get-ProjectPrefixText -ProjectId $Project | Out-Null
     }
     Write-Host "[OK] runtime initialized at $RuntimeDir" -ForegroundColor Green
 }
@@ -1010,6 +1046,7 @@ function Show-Help {
     Write-Host "  review -Project <project-id> -TaskId <id>"
     Write-Host "  prep-brief -Project <project-id> -TaskId <id>     # build cache-friendly prompt brief"
     Write-Host "  cache-stats                                        # prompt cache hit/miss stats"
+    Write-Host "  set-project-prefix -Project <project-id> -ProjectPrefix <text>"
     Write-Host "  dashboard -Project <project-id> [-ClaudeCount N]   # top main + bottom-left opencode + right stack"
     Write-Host "  metrics [-Project <project-id>]"
     Write-Host "  check-ports"
@@ -1030,6 +1067,7 @@ switch ($Command) {
     "review"      { Invoke-Review }
     "prep-brief"  { Invoke-PrepBrief }
     "cache-stats" { Invoke-CacheStats }
+    "set-project-prefix" { Invoke-SetProjectPrefix }
     "dashboard"   { Invoke-Dashboard }
     "metrics"     { Invoke-Metrics }
     "check-ports" { Invoke-CheckPorts }
