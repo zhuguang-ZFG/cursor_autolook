@@ -139,6 +139,46 @@ function Resolve-TaskRouting {
     return $null
 }
 
+function Get-RouteFallbackAssignees {
+    param(
+        [object]$Route,
+        [string]$PrimaryAssignee
+    )
+    $list = @()
+    if ($Route -and $Route.PSObject.Properties.Name -contains "fallbackAssignees") {
+        $list = @($Route.fallbackAssignees | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
+    if ([string]::IsNullOrWhiteSpace($PrimaryAssignee)) {
+        return @($list | Select-Object -Unique)
+    }
+    if ($list.Count -eq 0) {
+        return @($PrimaryAssignee)
+    }
+    $hasPrimary = @($list | Where-Object { $_ -eq $PrimaryAssignee }).Count -gt 0
+    if (-not $hasPrimary) {
+        $list = @($PrimaryAssignee) + $list
+    }
+    return @($list | Select-Object -Unique)
+}
+
+function Resolve-AssigneeForAttempt {
+    param(
+        [object]$TaskData,
+        [int]$AttemptCount
+    )
+    $fallback = @()
+    if ($TaskData.PSObject.Properties.Name -contains "fallbackAssignees") {
+        $fallback = @($TaskData.fallbackAssignees | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
+    if ($fallback.Count -eq 0) {
+        return [string]$TaskData.assignee
+    }
+    $idx = $AttemptCount
+    if ($idx -lt 0) { $idx = 0 }
+    if ($idx -ge $fallback.Count) { $idx = $fallback.Count - 1 }
+    return [string]$fallback[$idx]
+}
+
 function Contains-ApiNebula {
     param([string]$Text)
     if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
@@ -790,24 +830,28 @@ function Invoke-Init {
                     reviewer = "GitHub gpt-5-mini"
                     modelTier = "mid"
                     tokenPolicy = "strict"
+                    fallbackAssignees = @("DeepSeek", "Cursor", "OpenCode")
                 }
                 refactor = [ordered]@{
                     assignee = "OpenCode"
                     reviewer = "GitHub gpt-5-mini"
                     modelTier = "small"
                     tokenPolicy = "strict"
+                    fallbackAssignees = @("OpenCode", "DeepSeek", "Cursor")
                 }
                 review = [ordered]@{
                     assignee = "Claude"
                     reviewer = "GitHub gpt-5-mini"
                     modelTier = "large"
                     tokenPolicy = "quality-first"
+                    fallbackAssignees = @("Claude", "DeepSeek", "Cursor")
                 }
                 general = [ordered]@{
                     assignee = "Cursor"
                     reviewer = "GitHub gpt-5-mini"
                     modelTier = "small"
                     tokenPolicy = "strict"
+                    fallbackAssignees = @("Cursor", "DeepSeek", "OpenCode")
                 }
             }
             updatedAt = (Get-Timestamp)
@@ -833,6 +877,16 @@ function Invoke-Init {
             if (-not ($ap.PSObject.Properties.Name -contains "fallbackOnlyWhenAllFailed")) {
                 $ap | Add-Member -NotePropertyName fallbackOnlyWhenAllFailed -NotePropertyValue $true -Force
                 $changed = $true
+            }
+        }
+        foreach ($tt in @("bugfix", "refactor", "review", "general")) {
+            if ($routing.PSObject.Properties.Name -contains "byTaskType" -and $routing.byTaskType.PSObject.Properties.Name -contains $tt) {
+                $rt = $routing.byTaskType.$tt
+                if (-not ($rt.PSObject.Properties.Name -contains "fallbackAssignees")) {
+                    $fallback = Get-RouteFallbackAssignees -Route $rt -PrimaryAssignee ([string]$rt.assignee)
+                    $rt | Add-Member -NotePropertyName fallbackAssignees -NotePropertyValue $fallback -Force
+                    $changed = $true
+                }
             }
         }
         if ($changed) {
@@ -920,6 +974,7 @@ function Invoke-NewTask {
     $modelTier = "unset"
     $tokenPolicy = "unset"
     $routeSource = "manual"
+    $fallbackAssignees = @($finalAssignee)
     if (-not $NoAutoRoute) {
         $route = Resolve-TaskRouting -ResolvedTaskType $resolvedTaskType
         if ($route) {
@@ -936,6 +991,7 @@ function Invoke-NewTask {
             if ($route.PSObject.Properties.Name -contains "tokenPolicy") {
                 $tokenPolicy = [string]$route.tokenPolicy
             }
+            $fallbackAssignees = Get-RouteFallbackAssignees -Route $route -PrimaryAssignee $finalAssignee
             $routeSource = "routing.json"
         }
     }
@@ -975,11 +1031,13 @@ function Invoke-NewTask {
         modelTier = $modelTier
         tokenPolicy = $tokenPolicy
         routeSource = $routeSource
+        fallbackAssignees = @($fallbackAssignees)
         requiredArtifacts = @(Parse-ListArg -Value $Artifacts)
         testCommand = $(if ([string]::IsNullOrWhiteSpace($TestCommand)) { $null } else { $TestCommand })
         maxAttempts = $(if ($MaxAttempts -lt 1) { 1 } else { $MaxAttempts })
         attemptCount = 0
         notes = @()
+        dispatchEvidence = @()
         createdAt = (Get-Timestamp)
         updatedAt = (Get-Timestamp)
     }
@@ -1239,6 +1297,17 @@ function Invoke-Watchdog {
                     at = (Get-Timestamp)
                     text = "WATCHDOG: blocked after max attempts reached."
                 })
+                if (-not ($task.PSObject.Properties.Name -contains "dispatchEvidence")) {
+                    $task | Add-Member -NotePropertyName dispatchEvidence -NotePropertyValue @() -Force
+                }
+                $task.dispatchEvidence += ([ordered]@{
+                    at = (Get-Timestamp)
+                    event = "blocked"
+                    reason = "maxAttemptsReached"
+                    attemptCount = $attemptCount
+                    maxAttempts = $maxAttempts
+                    fallbackAssignees = if ($task.PSObject.Properties.Name -contains "fallbackAssignees") { @($task.fallbackAssignees) } else { @() }
+                })
                 $task.updatedAt = (Get-Timestamp)
                 Write-JsonFile -Path $file -Data $task
                 Add-MetricEvent -ProjectId $Project -EventType "blocked"
@@ -1249,6 +1318,10 @@ function Invoke-Watchdog {
             $file = Get-TaskFilePath -ProjectId $Project -TaskId $nextTask.id
             $task = Read-JsonFile -Path $file
             $task.status = "in_progress"
+            $chosenAssignee = Resolve-AssigneeForAttempt -TaskData $task -AttemptCount $attemptCount
+            if (-not [string]::IsNullOrWhiteSpace($chosenAssignee)) {
+                $task.assignee = $chosenAssignee
+            }
             if (-not ($task.PSObject.Properties.Name -contains "leaseUntil")) {
                 $task | Add-Member -NotePropertyName leaseUntil -NotePropertyValue $null -Force
             }
@@ -1260,9 +1333,21 @@ function Invoke-Watchdog {
             if (-not ($task.PSObject.Properties.Name -contains "notes")) {
                 $task | Add-Member -NotePropertyName notes -NotePropertyValue @() -Force
             }
+            if (-not ($task.PSObject.Properties.Name -contains "dispatchEvidence")) {
+                $task | Add-Member -NotePropertyName dispatchEvidence -NotePropertyValue @() -Force
+            }
             $task.notes += ([ordered]@{
                 at = (Get-Timestamp)
-                text = "WATCHDOG: auto-dispatched by Cursor hub."
+                text = ("WATCHDOG: auto-dispatched by Cursor hub. assignee={0} attempt={1}/{2}" -f $task.assignee, $task.attemptCount, $maxAttempts)
+            })
+            $task.dispatchEvidence += ([ordered]@{
+                at = (Get-Timestamp)
+                event = "dispatch"
+                assignee = [string]$task.assignee
+                attemptCount = [int]$task.attemptCount
+                maxAttempts = [int]$maxAttempts
+                leaseUntil = [string]$task.leaseUntil
+                fallbackAssignees = if ($task.PSObject.Properties.Name -contains "fallbackAssignees") { @($task.fallbackAssignees) } else { @() }
             })
             $task.updatedAt = (Get-Timestamp)
             Write-JsonFile -Path $file -Data $task
@@ -1856,6 +1941,7 @@ function Invoke-EvolveRouting {
     }
 
     $adjustments = 0
+    $routeTouched = $false
     $historyLines = @()
     foreach ($taskType in @("bugfix", "refactor", "review", "general")) {
         if (-not $taskStats.ContainsKey($taskType)) { continue }
@@ -1875,6 +1961,11 @@ function Invoke-EvolveRouting {
         $best = $candidates[0]
         $current = $routing.byTaskType.$taskType
         $currentAssignee = [string]$current.assignee
+        $fallbackRank = @($candidates | Select-Object -ExpandProperty assignee)
+        if ($fallbackRank.Count -gt 0) {
+            $current.fallbackAssignees = @($fallbackRank | Select-Object -First 4)
+            $routeTouched = $true
+        }
 
         $currentCandidate = $candidates | Where-Object { $_.assignee -eq $currentAssignee } | Select-Object -First 1
         $currentScore = if ($currentCandidate) { [int]$currentCandidate.score } else { -999 }
@@ -1884,11 +1975,12 @@ function Invoke-EvolveRouting {
             $current.assignee = $best.assignee
             $current.modelTier = Get-AgentDefaultTier -Assignee $best.assignee
             $adjustments++
+            $routeTouched = $true
             $historyLines += ("[{0}] taskType={1} assignee {2} -> {3} (score delta={4}, samples={5})" -f (Get-Timestamp), $taskType, $currentAssignee, $best.assignee, $delta, $best.samples)
         }
     }
 
-    if ($adjustments -eq 0) {
+    if (-not $routeTouched) {
         Write-Host "[EvolveRouting] no bounded routing change applied." -ForegroundColor Yellow
         return
     }
