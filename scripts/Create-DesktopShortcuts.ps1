@@ -51,6 +51,11 @@ New-AutolookLnk -Name "CursorAutolook-Start.lnk" `
     -WorkDir $Repo `
     -DescriptionZh "Cursor Autolook: interactive menu (recommended)"
 
+New-AutolookLnk -Name "CursorAutolook-Schedule.lnk" `
+    -Arguments "-ExecutionPolicy Bypass -NoProfile -File `"$Repo\cursor-autolook.ps1`" schedule" `
+    -WorkDir $Repo `
+    -DescriptionZh "Cursor Autolook: one-click schedule (go + watchdog in new window)"
+
 New-AutolookLnk -Name "CursorAutolook-RepoShell.lnk" `
     -Arguments $terminalCmd `
     -WorkDir $Repo `

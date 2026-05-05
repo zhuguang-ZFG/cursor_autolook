@@ -5,6 +5,7 @@ if (-not (Test-Path -LiteralPath $Desktop)) { throw "Desktop not found." }
 $keep = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 foreach ($k in @(
         "CursorAutolook-Start.lnk",
+        "CursorAutolook-Schedule.lnk",
         "CursorAutolook-RepoShell.lnk",
         "CursorAutolook-Help.lnk",
         "CursorAutolook-Doctor.lnk",

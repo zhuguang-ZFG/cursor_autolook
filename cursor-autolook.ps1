@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("menu", "go", "go-watch", "go-hub", "help", "init", "new-project", "new-task", "set-task", "status", "next", "check-ports", "reconcile", "watchdog", "review", "dashboard", "quick-check", "e2e-check", "stress-scheduler", "kxnx-audit", "automation-hub", "worker-queue", "serve-worker-queue", "follow-feed", "doctor", "list-callbacks", "ccswitch-providers", "metrics", "prep-brief", "cache-stats", "set-project-prefix", "enter-workflow", "serve-codex", "serve-deepseek", "serve-opencode", "current-workflow", "agent-done", "close-open", "consume-callbacks", "watch-callbacks", "evolve-supervisor", "supervisor-evolution", "evolve-routing", "evolve-reliability", "ops-report")]
+    [ValidateSet("menu", "go", "go-watch", "go-hub", "schedule", "schedule-hub", "help", "init", "new-project", "new-task", "set-task", "status", "next", "check-ports", "reconcile", "watchdog", "review", "dashboard", "quick-check", "e2e-check", "stress-scheduler", "kxnx-audit", "automation-hub", "worker-queue", "serve-worker-queue", "follow-feed", "doctor", "list-callbacks", "ccswitch-providers", "metrics", "prep-brief", "cache-stats", "set-project-prefix", "enter-workflow", "serve-codex", "serve-deepseek", "serve-opencode", "current-workflow", "agent-done", "close-open", "consume-callbacks", "watch-callbacks", "evolve-supervisor", "supervisor-evolution", "evolve-routing", "evolve-reliability", "ops-report")]
     [string]$Command = "menu",
 
     [string]$Name,
@@ -102,6 +102,8 @@ switch ($Command) {
     "go"          { Invoke-GoWorkflow }
     "go-watch"    { Invoke-GoWatch }
     "go-hub"      { Invoke-GoHub }
+    "schedule"        { Invoke-GoWatch }
+    "schedule-hub"    { Invoke-GoHub }
     "help"        { Show-Help }
     "init"        { Invoke-Init }
     "new-project" { Invoke-NewProject }

@@ -18,9 +18,12 @@ function Invoke-SimpleMenu {
         Write-Host " 4  New task"
         Write-Host " 5  Status"
         Write-Host " 6  Set active project (enter-workflow)"
+        Write-Host "*  ONE-CLICK SCHEDULE (new PS window, non-blocking):"
+        Write-Host "12  schedule        -> go + watchdog"
+        Write-Host "13  schedule-hub    -> go + automation-hub"
         Write-Host " 7  Dashboard (Windows Terminal)"
-        Write-Host " 8  Automation hub"
-        Write-Host " 9  Watchdog"
+        Write-Host " 8  Automation hub (this terminal)"
+        Write-Host " 9  Watchdog (this terminal)"
         Write-Host "10  Consume callbacks"
         Write-Host "11  Full command list (help)"
         Write-Host " 0  Exit"
@@ -94,6 +97,26 @@ function Invoke-SimpleMenu {
             $script:Project = $proj
             Invoke-EnterWorkflow
         }
+        elseif ($choice -eq "12") {
+            try {
+                $proj = Get-OrAskProject
+            } catch {
+                Write-Host $_ -ForegroundColor Red
+                continue
+            }
+            $script:Project = $proj
+            Invoke-GoWatch
+        }
+        elseif ($choice -eq "13") {
+            try {
+                $proj = Get-OrAskProject
+            } catch {
+                Write-Host $_ -ForegroundColor Red
+                continue
+            }
+            $script:Project = $proj
+            Invoke-GoHub
+        }
         elseif ($choice -eq "7") {
             try {
                 $proj = Get-OrAskProject
@@ -132,7 +155,7 @@ function Invoke-SimpleMenu {
             Show-Help
         }
         else {
-            Write-Host "Invalid choice; type 0-11." -ForegroundColor Yellow
+            Write-Host "Invalid choice; use 0-13 (or see list above)." -ForegroundColor Yellow
         }
     }
 }

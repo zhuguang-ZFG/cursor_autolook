@@ -3,8 +3,16 @@ function Resolve-GoProjectId {
     if (-not (Test-Path -LiteralPath $resolver)) {
         throw "Missing $resolver"
     }
-    if (-not [string]::IsNullOrWhiteSpace([string]$Project)) {
-        return (& $resolver -PreferredProject ([string]$Project).Trim())
+    $explicit = [string]$Project
+    if ([string]::IsNullOrWhiteSpace($explicit)) {
+        try {
+            $explicit = [string]$script:Project
+        } catch {
+            $explicit = ""
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($explicit)) {
+        return (& $resolver -PreferredProject $explicit.Trim())
     }
     return (& $resolver)
 }
@@ -32,7 +40,7 @@ function Invoke-GoWatch {
     Start-Process -FilePath $psExe -WorkingDirectory $Root `
         -ArgumentList @("-NoExit", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $cli,
         "watchdog", "-Project", $p, "-Interval", $iv)
-    Write-Host "[go-watch] Watchdog opened in a new PowerShell window (Ctrl+C there to stop)." -ForegroundColor Green
+    Write-Host "[schedule / go-watch] Watchdog opened in a new PowerShell window (Ctrl+C there to stop)." -ForegroundColor Green
 }
 
 function Invoke-GoHub {
@@ -46,5 +54,5 @@ function Invoke-GoHub {
     Start-Process -FilePath $psExe -WorkingDirectory $Root `
         -ArgumentList @("-NoExit", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $cli,
         "automation-hub", "-Project", $p, "-Interval", "10")
-    Write-Host "[go-hub] automation-hub opened in a new PowerShell window (Ctrl+C there to stop)." -ForegroundColor Green
+    Write-Host "[schedule-hub / go-hub] automation-hub opened in a new PowerShell window (Ctrl+C there to stop)." -ForegroundColor Green
 }

@@ -15,12 +15,14 @@
 ## 快速开始
 
 ```powershell
-# 最省事（无 Read-Host，适合自动化/Agent）：自动解析 -Project 后进工作流
-powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 go
-powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 go -Project my-project-id
-# go + 新窗口 watchdog / automation-hub（长驻不占当前控制台）
-powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 go-watch [-Project …] [-Interval 30]
-powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 go-hub   [-Project …]
+# 一键调度（推荐）：进工作流 + 另开窗口跑 watchdog，不占当前终端
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 schedule
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 schedule -Project my-project-id
+# 一键调度（回调环）：新窗口 automation-hub
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 schedule-hub [-Project …]
+# 仅进工作流上下文（无调度窗口）
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 go [-Project …]
+# 别名：go-watch / go-hub 与 schedule / schedule-hub 等价
 
 # 查看帮助（或默认无参数时为交互菜单）
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 help
