@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("help", "init", "new-project", "new-task", "set-task", "status", "next", "check-ports", "reconcile", "watchdog", "review", "dashboard", "quick-check", "e2e-check", "metrics")]
+    [ValidateSet("help", "init", "new-project", "new-task", "set-task", "status", "next", "check-ports", "reconcile", "watchdog", "review", "dashboard", "quick-check", "e2e-check", "metrics", "prep-brief", "cache-stats")]
     [string]$Command = "help",
 
     [string]$Name,
@@ -28,6 +28,8 @@ $ProjectsDir = Join-Path $RuntimeDir "projects"
 $PortsFile = Join-Path $RuntimeDir "ports.json"
 $MetricsFile = Join-Path $RuntimeDir "metrics.json"
 $AlertsLogFile = Join-Path $RuntimeDir "alerts.log"
+$PromptCacheDir = Join-Path $RuntimeDir "prompt-cache"
+$PromptPrefixFile = Join-Path $PromptCacheDir "static-prefix-v1.md"
 $ReservedPortStart = 16121
 $ReservedPortEnd = 16160
 $KnownConflictStart = 15921
@@ -99,6 +101,8 @@ function Get-Metrics {
                 done = 0
                 requeued = 0
                 blocked = 0
+                cacheHit = 0
+                cacheMiss = 0
             }
             projects = @{}
             updatedAt = (Get-Timestamp)
@@ -113,6 +117,17 @@ function Save-Metrics {
     Write-JsonFile -Path $MetricsFile -Data $Metrics
 }
 
+function Get-MetricValue {
+    param(
+        [object]$Obj,
+        [string]$Name
+    )
+    if ($Obj -and $Obj.PSObject.Properties.Name -contains $Name) {
+        return [int]$Obj.$Name
+    }
+    return 0
+}
+
 function Add-MetricEvent {
     param(
         [string]$ProjectId,
@@ -124,7 +139,7 @@ function Add-MetricEvent {
     }
     if (-not ($m.projects.PSObject.Properties.Name -contains $ProjectId)) {
         $m.projects | Add-Member -NotePropertyName $ProjectId -NotePropertyValue ([pscustomobject]@{
-            created = 0; dispatched = 0; reviewed = 0; done = 0; requeued = 0; blocked = 0
+            created = 0; dispatched = 0; reviewed = 0; done = 0; requeued = 0; blocked = 0; cacheHit = 0; cacheMiss = 0
         }) -Force
     }
     if (-not ($m.totals.PSObject.Properties.Name -contains $EventType)) {
@@ -137,6 +152,116 @@ function Add-MetricEvent {
     $m.totals.$EventType = [int]$m.totals.$EventType + 1
     $projectMetrics.$EventType = [int]$projectMetrics.$EventType + 1
     Save-Metrics -Metrics $m
+}
+
+function Get-PromptPrefix {
+    Ensure-Directory $PromptCacheDir
+    if (-not (Test-Path $PromptPrefixFile)) {
+        $prefix = @"
+You are a coding worker in a cost-sensitive multi-agent workflow.
+
+Rules:
+1) Keep output concise and actionable.
+2) Reuse existing context; avoid repeating large unchanged explanations.
+3) Provide only task-relevant findings and next steps.
+4) Prefer minimal diffs and focused edits.
+5) If uncertain, ask one concrete question.
+"@
+        Set-Content -Path $PromptPrefixFile -Value $prefix -Encoding UTF8
+    }
+    return (Get-Content -Path $PromptPrefixFile -Raw)
+}
+
+function Build-DynamicTaskSuffix {
+    param(
+        [string]$ProjectId,
+        [object]$TaskData
+    )
+    $notes = @()
+    if ($TaskData.PSObject.Properties.Name -contains "notes") {
+        $notes = @($TaskData.notes | Select-Object -Last 3 | ForEach-Object { [string]$_.text })
+    }
+    $noteText = if ($notes.Count -gt 0) { $notes -join " | " } else { "(none)" }
+    $artifacts = if ($TaskData.PSObject.Properties.Name -contains "requiredArtifacts") { @($TaskData.requiredArtifacts) } else { @() }
+    $artifactsText = if ($artifacts.Count -gt 0) { $artifacts -join ", " } else { "(none)" }
+    $testCmd = if ($TaskData.PSObject.Properties.Name -contains "testCommand" -and -not [string]::IsNullOrWhiteSpace([string]$TaskData.testCommand)) { [string]$TaskData.testCommand } else { "(none)" }
+
+    return @"
+Project: $ProjectId
+TaskId: $($TaskData.id)
+Title: $($TaskData.title)
+Status: $($TaskData.status)
+Assignee: $($TaskData.assignee)
+Reviewer: $($TaskData.reviewer)
+RequiredArtifacts: $artifactsText
+TestCommand: $testCmd
+RecentNotes: $noteText
+"@
+}
+
+function Get-TaskCacheFile {
+    param(
+        [string]$ProjectId,
+        [string]$TaskId
+    )
+    $projectCacheDir = Join-Path $PromptCacheDir $ProjectId
+    Ensure-Directory $projectCacheDir
+    return (Join-Path $projectCacheDir "$TaskId.cache.json")
+}
+
+function Invoke-PrepBrief {
+    if ([string]::IsNullOrWhiteSpace($Project)) { throw "Please provide -Project" }
+    if ([string]::IsNullOrWhiteSpace($TaskId)) { throw "Please provide -TaskId" }
+    $taskFile = Get-TaskFilePath -ProjectId $Project -TaskId $TaskId
+    if (-not (Test-Path $taskFile)) { throw "Task not found: $TaskId" }
+
+    Ensure-Directory $PromptCacheDir
+    $prefix = Get-PromptPrefix
+    $task = Read-JsonFile -Path $taskFile
+    $dynamic = Build-DynamicTaskSuffix -ProjectId $Project -TaskData $task
+    $keySource = ($dynamic + "`n" + (Get-Content -Path $PromptPrefixFile -Raw))
+    $hash = (Get-FileHash -InputStream ([System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($keySource))) -Algorithm SHA256).Hash
+    $cacheFile = Get-TaskCacheFile -ProjectId $Project -TaskId $TaskId
+    $briefFile = Join-Path (Split-Path -Parent $cacheFile) "$TaskId.brief.md"
+
+    $hit = $false
+    if (Test-Path $cacheFile) {
+        $cached = Read-JsonFile -Path $cacheFile
+        if ($cached.PSObject.Properties.Name -contains "hash" -and [string]$cached.hash -eq $hash) {
+            $hit = $true
+        }
+    }
+
+    if ($hit) {
+        Add-MetricEvent -ProjectId $Project -EventType "cacheHit"
+        Write-Host "[CACHE HIT] brief unchanged: $briefFile" -ForegroundColor Green
+    } else {
+        $brief = $prefix + "`n`n---`n`n" + $dynamic
+        Set-Content -Path $briefFile -Value $brief -Encoding UTF8
+        Write-JsonFile -Path $cacheFile -Data ([ordered]@{
+            hash = $hash
+            briefPath = $briefFile
+            updatedAt = (Get-Timestamp)
+        })
+        Add-MetricEvent -ProjectId $Project -EventType "cacheMiss"
+        Write-Host "[CACHE MISS] brief regenerated: $briefFile" -ForegroundColor Yellow
+    }
+}
+
+function Invoke-CacheStats {
+    $m = Get-Metrics
+    $cacheHit = Get-MetricValue -Obj $m.totals -Name "cacheHit"
+    $cacheMiss = Get-MetricValue -Obj $m.totals -Name "cacheMiss"
+    Write-Host ""
+    Write-Host "Prompt Cache Stats" -ForegroundColor Cyan
+    Write-Host ("  cacheHit={0} cacheMiss={1}" -f $cacheHit, $cacheMiss)
+    $total = [int]$cacheHit + [int]$cacheMiss
+    if ($total -gt 0) {
+        $ratio = [math]::Round((100.0 * [double]$cacheHit / [double]$total), 2)
+        Write-Host ("  hitRate={0}%" -f $ratio)
+    } else {
+        Write-Host "  hitRate=N/A"
+    }
 }
 
 function Send-Alert {
@@ -237,6 +362,8 @@ function Invoke-Init {
     if (-not (Test-Path $MetricsFile)) {
         Save-Metrics -Metrics (Get-Metrics)
     }
+    Ensure-Directory $PromptCacheDir
+    Get-PromptPrefix | Out-Null
     Write-Host "[OK] runtime initialized at $RuntimeDir" -ForegroundColor Green
 }
 
@@ -293,6 +420,8 @@ function Invoke-NewTask {
 
     Write-JsonFile -Path (Join-Path $tasksDir "$taskId.json") -Data $task
     Add-MetricEvent -ProjectId $Project -EventType "created"
+    $script:TaskId = $taskId
+    Invoke-PrepBrief
     Write-Host "[OK] task created: $taskId ($Title)" -ForegroundColor Green
 }
 
@@ -331,6 +460,7 @@ function Invoke-SetTask {
     $task.updatedAt = (Get-Timestamp)
 
     Write-JsonFile -Path $file -Data $task
+    Invoke-PrepBrief
     Write-Host "[OK] task updated: $TaskId -> $($task.status)" -ForegroundColor Green
 }
 
@@ -635,10 +765,19 @@ function Invoke-Review {
 
 function Invoke-Metrics {
     $m = Get-Metrics
+    $created = Get-MetricValue -Obj $m.totals -Name "created"
+    $dispatched = Get-MetricValue -Obj $m.totals -Name "dispatched"
+    $reviewed = Get-MetricValue -Obj $m.totals -Name "reviewed"
+    $done = Get-MetricValue -Obj $m.totals -Name "done"
+    $requeued = Get-MetricValue -Obj $m.totals -Name "requeued"
+    $blocked = Get-MetricValue -Obj $m.totals -Name "blocked"
+    $cacheHit = Get-MetricValue -Obj $m.totals -Name "cacheHit"
+    $cacheMiss = Get-MetricValue -Obj $m.totals -Name "cacheMiss"
     Write-Host ""
     Write-Host "Metrics Totals" -ForegroundColor Cyan
     Write-Host ("  created={0} dispatched={1} reviewed={2} done={3} requeued={4} blocked={5}" -f
-        $m.totals.created, $m.totals.dispatched, $m.totals.reviewed, $m.totals.done, $m.totals.requeued, $m.totals.blocked)
+        $created, $dispatched, $reviewed, $done, $requeued, $blocked)
+    Write-Host ("  cacheHit={0} cacheMiss={1}" -f $cacheHit, $cacheMiss)
     Write-Host ("  updatedAt={0}" -f $m.updatedAt) -ForegroundColor DarkGray
     if ($Project) {
         if ($m.projects.PSObject.Properties.Name -contains $Project) {
@@ -816,6 +955,8 @@ function Show-Help {
     Write-Host "  reconcile -Project <project-id>"
     Write-Host "  watchdog -Project <project-id> [-Interval 30] [-MaxRounds 0] [-LeaseMinutes 45]"
     Write-Host "  review -Project <project-id> -TaskId <id>"
+    Write-Host "  prep-brief -Project <project-id> -TaskId <id>     # build cache-friendly prompt brief"
+    Write-Host "  cache-stats                                        # prompt cache hit/miss stats"
     Write-Host "  dashboard -Project <project-id> [-ClaudeCount N]   # top main + bottom-left opencode + right stack"
     Write-Host "  metrics [-Project <project-id>]"
     Write-Host "  check-ports"
@@ -834,6 +975,8 @@ switch ($Command) {
     "reconcile"   { Invoke-Reconcile }
     "watchdog"    { Invoke-Watchdog }
     "review"      { Invoke-Review }
+    "prep-brief"  { Invoke-PrepBrief }
+    "cache-stats" { Invoke-CacheStats }
     "dashboard"   { Invoke-Dashboard }
     "metrics"     { Invoke-Metrics }
     "check-ports" { Invoke-CheckPorts }

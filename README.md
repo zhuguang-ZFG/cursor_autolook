@@ -60,6 +60,12 @@ powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 e2e-check
 # 查看产能指标
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 metrics
 
+# 生成缓存友好的任务 brief（静态前缀 + 动态后缀）
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 prep-brief -Project my-project -TaskId <task-id>
+
+# 查看提示词缓存命中率
+powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 cache-stats
+
 # 更新任务状态
 powershell -ExecutionPolicy Bypass -File .\cursor-autolook.ps1 set-task -Project my-project -TaskId <task-id> -Status in_review
 ```
@@ -100,6 +106,8 @@ runtime/
 - `watchdog`：自动编排循环（调和 + 自动分派下一个 `ready` 任务）。
 - `review`：自动审查决策（`in_review` -> `done/ready`）。
 - `review`：自动审查决策 + 强制验收门（产物存在、测试命令通过）。
+- `prep-brief`：按缓存策略生成任务 brief（尽量提高 token 缓存命中）。
+- `cache-stats`：查看缓存命中/未命中统计与命中率。
 - `dashboard`：类似工作台布局（上方主控，左下 OpenCode，右侧纵向队列 DeepSeek + Claude）。默认自动计算 Claude 数量（按 `ready/in_progress/in_review` 任务数，范围 `1-6`）；也可用 `-ClaudeCount` 手动覆盖（`0-6`）。
 - `metrics`：查看累计吞吐指标（创建/分派/审查/完成/返工/阻断）。
 - `check-ports`：检查当前端口规划是否与其它仓库冲突。
@@ -110,6 +118,7 @@ runtime/
 
 - 已实现：自动调度、自动回收、自动审查、验收门、失败重试上限熔断（超限 `blocked`）。
 - 已实现：告警钩子（写入 `runtime/alerts.log`，可选 `AUTOLOOK_ALERT_WEBHOOK` 推送）。
+- 已实现：提示词缓存（静态前缀 + 动态后缀哈希，记录 `cacheHit/cacheMiss`）。
 
 ## 端口规划
 
